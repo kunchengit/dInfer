@@ -15,6 +15,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Modified from LLaDA repos: https://github.com/ML-GSAI/LLaDA
 
+from functools import partial
+import math
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -59,7 +61,8 @@ def get_num_transfer_tokens(mask_index, steps):
 
 @ torch.no_grad()
 def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-             remasking='low_confidence', mask_id=126336, threshold=None, factor=None):
+             remasking='low_confidence', mask_id=126336, threshold=None, factor=None,
+             decoding="origin", **kwargs):
     '''
     Args:
         model: Mask predictor.
@@ -72,6 +75,16 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
         remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
     '''
+    if decoding == "origin":
+        get_transfer_index_cur = get_transfer_index
+    elif decoding == "herachical_fast_v2":
+        get_transfer_index = partial (get_transfer_index_hierarchy_fast_v2, low_threshold = kwargs["low_threshold"])
+    else:
+        raise NotImplementedError (decoding)
+
+
+        
+
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
 
@@ -315,6 +328,64 @@ def get_transfer_index_dynamic(logits, temperature, remasking, mask_index, x, nu
 
         _, select_index = torch.topk(confidence[j], k=top_i)
         transfer_index[j, select_index] = True
+
+    return x0, transfer_index
+
+@ torch.no_grad()
+def get_transfer_index_hierarchy_fast_v2 (logits, temperature, remasking, mask_index, x, num_transfer_tokens,  threshold=None,  low_threshold = None):
+    if not math.isclose(temperature, 0.0):
+        logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+    else:
+        logits_with_noise = logits
+
+    x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
+
+    if remasking == 'low_confidence':
+        p = F.softmax(logits.to(torch.float64), dim=-1)
+        x0_p = torch.squeeze(
+            torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
+    else:
+        raise NotImplementedError(remasking)
+    
+    x0 = torch.where(mask_index, x0, x)
+    confidence = torch.where(mask_index, x0_p, -np.inf)
+    
+
+    transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+    if  num_transfer_tokens is not None:
+        assert threshold is None
+        for j in range(confidence.shape[0]):
+            _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j])
+            transfer_index[j, select_index] = True
+    
+    else:
+        for i in range (mask_index.shape[0]):
+
+            mask_i = mask_index[i].int()
+            conf_i = confidence[i]
+
+            if low_threshold is not None:
+                max_value, max_index = torch.max(conf_i, dim=0)
+                if max_value < low_threshold:
+                    transfer_index [i, max_index] = True
+                    continue
+
+
+            diff = torch.diff(torch.cat([mask_i[:1]*0, mask_i, mask_i[-1:]*0]))
+            starts = (diff == 1).nonzero(as_tuple=True)[0]
+            ends = (diff == -1).nonzero(as_tuple=True)[0]
+
+
+            if len(starts) > 0:
+                max_indices = [s + torch.argmax(conf_i[s:e]) for s, e in zip(starts.tolist(), ends.tolist())]
+                transfer_index[i, max_indices] = True
+            
+            if low_threshold is not None:
+                transfer_index [i] = torch.logical_and (transfer_index[i], conf_i > low_threshold) 
+                
+        if threshold is not None:
+            transfer_index = torch.logical_or(transfer_index, confidence > threshold)
+
 
     return x0, transfer_index
 
