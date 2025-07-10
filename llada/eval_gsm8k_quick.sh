@@ -14,11 +14,11 @@ output_path='/ossfs/workspace/res'
 
 
 # baseline
-accelerate launch eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot}  --output_path ${output_path} \
---confirm_run_unsafe_code --model llada_dist \
---model_args model_path=${model_path},gen_length=${length},steps=${length},block_length=${block_length},show_speed=True
-
-# parallel
 #accelerate launch eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot}  --output_path ${output_path} \
 #--confirm_run_unsafe_code --model llada_dist \
-#--model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},threshold=0.9,show_speed=True
+#--model_args model_path=${model_path},gen_length=${length},steps=${length},block_length=${block_length},show_speed=True
+
+# parallel
+accelerate launch --num_processes 1 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot}  --output_path ${output_path} \
+--confirm_run_unsafe_code --model llada_dist \
+--model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},threshold=0.9,show_speed=True

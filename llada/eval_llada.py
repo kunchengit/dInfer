@@ -101,6 +101,7 @@ class LLaDAEvalHarness(LM):
         config.flash_attention = True
         self.model = LLaDAModelLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.bfloat16, config=config, **model_kwargs)
         self.model.eval()
+        self.model = torch.compile (self.model)
 
         self.device = torch.device(device)
         if self.accelerator is not None:
