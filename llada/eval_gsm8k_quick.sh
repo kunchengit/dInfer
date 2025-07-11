@@ -19,11 +19,17 @@ output_path='/ossfs/workspace/res'
 #--model_args model_path=${model_path},gen_length=${length},steps=${length},block_length=${block_length},show_speed=True
 
 # parallel
-#accelerate launch --num_processes 1 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot}  --output_path ${output_path} \
+#accelerate launch --num_processes 1  --main_process_port 11213 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot}  --output_path ${output_path} \
 #--confirm_run_unsafe_code --model llada_dist \
 #--model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},threshold=0.9,show_speed=True
 
 # fast_hierachical
+#accelerate launch --num_processes 1 eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot}  --output_path ${output_path} \
+#--confirm_run_unsafe_code --model llada_dist \
+#--model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,decoding='herachical_fast_v2',threshold=0.9,low_threshold=0.48
+
+
+# hierachical with remask
 accelerate launch eval_llada.py --tasks ${task} --num_fewshot ${num_fewshot}  --output_path ${output_path} \
 --confirm_run_unsafe_code --model llada_dist \
---model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},factor=${factor},show_speed=True,decoding='herachical_fast_v2',low_threshold=0.48
+--model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},show_speed=True,decoding='herachical_remasking',threshold=0.9,low_threshold=0.48,remask_threshold=0.4
