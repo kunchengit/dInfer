@@ -553,7 +553,7 @@ def generate_with_cache(model, prompt, rank=0, world_size=1, steps=128, gen_leng
                 for jj in range(len(past_key_values[ii])):
                     new_past_key_values[ii] += (past_key_values[ii][jj].clone(),)    
             past_key_values = new_past_key_values
-        
+            
             if world_size==1:
                 logits = model(x[:, current_block_start:].clone(), past_key_values=past_key_values, use_cache=True).logits
                 op_num += calculate_op_num(x[:, current_block_start:], cache_length=total_length)
@@ -577,7 +577,7 @@ def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transf
     x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
 
     if remasking == 'low_confidence':
-        p = F.softmax(logits.to(torch.float64), dim=-1)
+        p = F.softmax(logits, dim=-1)
         x0_p = torch.squeeze(
             torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
     elif remasking == 'random':
@@ -604,7 +604,7 @@ def get_transfer_index_dynamic(logits, temperature, remasking, mask_index, x, nu
     logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
     x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
     if remasking == 'low_confidence':
-        p = F.softmax(logits.to(torch.float64), dim=-1)
+        p = F.softmax(logits, dim=-1)
         x0_p = torch.squeeze(
             torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
     elif remasking == 'random':
