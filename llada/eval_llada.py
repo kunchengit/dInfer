@@ -26,6 +26,11 @@ import random
 import numpy as np
 import torch.nn.functional as F
 from datasets import Dataset
+from tqdm import tqdm
+from lm_eval.api.model import LM
+import accelerate
+import random
+import numpy as np
 from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
@@ -37,6 +42,11 @@ from generate import generate, generate_with_prefix_cache, generate_with_dual_ca
 from model.modeling_llada import LLaDAModelLM
 import json
 import time
+import datasets
+datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
+datasets.config.DOWNLOAD_TIMEOUT = 180  # 单位为秒，默认是10
+
+
 def set_seed(seed):
     torch.manual_seed(seed)
     random.seed(seed)
@@ -283,24 +293,24 @@ class LLaDAEvalHarness(LM):
     def generate_until(self, requests):
         output = []
         num_tokens = 0
+        num_tokens_our = 0
         num_nfe = 0
         processed_count = 0
+
+        out_to_file = []
+        forward_calls = 0
+        total_time = 0
         if self.save_dir is not None:
             os.makedirs(self.save_dir, exist_ok=True)
             rank = self.rank
             save_path = os.path.join(self.save_dir, f'rank_{rank}.jsonl')
             print(f"save_path: {save_path}")
-            if os.path.exists(save_path):
-                print(f"load from {save_path}")
-                with open(save_path, 'r', encoding='utf-8') as f:
-                    output = [json.loads(line) for line in f]
-                    processed_count = len(output)
-                print(f"processed_count: {processed_count}")
         start_time = time.time()
         for i, req in enumerate(tqdm(requests, desc="Generating...")):
             if i < processed_count:
                 continue
-                
+            
+            start_time = time.time()
             question = req.args[0]
             if self.is_instruct:
                 m = [{"role": "user", "content": question}]
@@ -327,6 +337,7 @@ class LLaDAEvalHarness(LM):
             if self.is_instruct and 'task_id' in req.doc and str(req.doc['task_id']).lower().startswith('humaneval'):
                 if self.show_speed:
                     num_tokens += (generated_answer != 126081).sum()
+                    num_tokens_our += self.gen_length
                     num_nfe += nfe
                 generated_answer = self.tokenizer.decode(generated_answer[0][input_ids.shape[1]:], skip_special_tokens=True)
             else:
@@ -339,29 +350,36 @@ class LLaDAEvalHarness(LM):
                 generated_answer_ids = torch.tensor(self.tokenizer(generated_answer)["input_ids"])
                 if self.show_speed:
                     num_tokens += (generated_answer_ids != 126081).sum()
+                    num_tokens_our += self.gen_length
                     num_nfe += nfe
                 generated_answer = self.tokenizer.decode(generated_answer_ids, skip_special_tokens=True)
             output.append(generated_answer)
-
-            if self.save_dir is not None:
+            
+            if self.show_speed:
+                one_time = time.time() - start_time
+                total_time += one_time
+                # forward_calls += num_nfe
+                # out_to_file.append({'answer':generated_answer,'number_of_forward_call': self.model._forward_call_count})
+                out_to_file = {'answer':generated_answer,'number_of_forward_call': nfe, 'token per second':self.gen_length / one_time}
+                if self.save_dir is not None:
                 # 增量保存新生成的答案
-                with open(save_path, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps(generated_answer, ensure_ascii=False) + '\n')
-
-            print('=' * 20)
-            print('question: ', question)
-            print('answer: ', generated_answer)
-            print('=' * 20, end='\n\n')
-            # self.accelerator.wait_for_everyone()
-        end_time = time.time()
-        if self.show_speed:
-            print(f"Total number of tokens generated: {num_tokens}")
-            print(f"Total time taken: {end_time - start_time} seconds")
-            print(f"Tokens per second: {num_tokens / (end_time - start_time)}")
-            print(f"Total NFE is {num_nfe}")
+                    with open(save_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps(out_to_file, ensure_ascii=False) + '\n')
+            if self.accelerator is not None:
+                self.accelerator.wait_for_everyone()
+        # end_time = time.time()
+        if self.show_speed and self.save_dir is not None:
+            with open (self.save_dir+f'/rank{self.rank}_afcpt.jsonl', 'w', encoding='utf-8') as file:
+                data={'rank':f'rank{self.rank}',
+                      'average forward calls per token': num_nfe / int(num_tokens),
+                      'tokens per second': int(num_tokens) / total_time,
+                      'tokens per second our': num_tokens_our / total_time}
+                file.write(json.dumps(data, ensure_ascii=False) + '\n')
+                # print(f'average forward calls per token on rank{self.rank}: {forward_calls / num_tokens}')
         return output
 
 
 if __name__ == "__main__":
+    set_seed(1234)
     cli_evaluate()
     
