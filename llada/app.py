@@ -3,7 +3,8 @@ import numpy as np
 import gradio as gr
 import torch.nn.functional as F
 from transformers import AutoTokenizer
-from model.modeling_llada import LLaDAModelLM
+#from model.modeling_llada import LLaDAModelLM
+from model.modeling_llada_origin import LLaDAModelLM
 import time
 import re
 
