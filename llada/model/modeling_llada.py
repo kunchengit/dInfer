@@ -46,11 +46,12 @@ import torch
 import torch.backends.cuda
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import einsum
+import torch.distributed as dist
+from torch import einsum, values_copy
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.auto import AutoModel
-from transformers.cache_utils import Cache
+from .flash_attn_triton import FlashAttnFunc
 
 from .configuration_llada import (
     LLaDAConfig,
@@ -62,6 +63,7 @@ from .configuration_llada import (
     ModelConfig,
     ActivationCheckpointingStrategy,
 )
+from einops import rearrange
 
 if sys.version_info.minor > 8:
     from collections.abc import MutableMapping
@@ -405,12 +407,12 @@ class RotaryEmbedding(nn.Module):
             and pos_cos.shape[-2] >= seq_len
         ):
             if pos_sin.device != device:
-                pos_sin = pos_sin.to(device)
+                pos_sin = pos_sin.clone().to(device)
                 self.__cache["rope_pos_sin"] = pos_sin
             if pos_cos.device != device:
-                pos_cos = pos_cos.to(device)
+                pos_cos = pos_cos.clone().to(device)
                 self.__cache["rope_pos_cos"] = pos_cos
-            return pos_sin[:, :, :seq_len, :], pos_cos[:, :, :seq_len, :]
+            return pos_sin[:, :, :seq_len, :].clone(), pos_cos[:, :, :seq_len, :].clone()
 
         with torch.autocast(device.type, enabled=False):
             dim = self.config.d_model // self.config.n_heads
@@ -419,8 +421,8 @@ class RotaryEmbedding(nn.Module):
             freqs = einsum("i , j -> i j", seq, inv_freq)
             positions = torch.cat((freqs, freqs), dim=-1)
             pos_sin, pos_cos = positions.sin()[None, None, :, :], positions.cos()[None, None, :, :]
-        self.__cache["rope_pos_sin"] = pos_sin
-        self.__cache["rope_pos_cos"] = pos_cos
+        self.__cache["rope_pos_sin"] = pos_sin.clone()
+        self.__cache["rope_pos_cos"] = pos_cos.clone()
         return pos_sin, pos_cos
 
     def rotate_half(self, x: torch.Tensor) -> torch.Tensor:
@@ -432,7 +434,7 @@ class RotaryEmbedding(nn.Module):
     def apply_rotary_pos_emb(self, pos_sin: torch.Tensor, pos_cos: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         return ((t * pos_cos) + (self.rotate_half(t) * pos_sin)).to(t.dtype)
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, block_end_index: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, q: torch.Tensor, k: torch.Tensor, block_end_index: Optional[torch.Tensor] = None, start_pos: int=0) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.config.rope_full_precision:
             q_, k_ = q.float(), k.float()
         else:
@@ -440,22 +442,22 @@ class RotaryEmbedding(nn.Module):
 
         with torch.autocast(q.device.type, enabled=False):
             query_len, key_len = q_.shape[-2], k_.shape[-2]  # could be different if layer_past not None
-            pos_sin, pos_cos = self.get_rotary_embedding(key_len, q_.device)
+            pos_sin, pos_cos = self.get_rotary_embedding(key_len+start_pos, q_.device)
             pos_sin = pos_sin.type_as(q_)
             pos_cos = pos_cos.type_as(q_)
             if block_end_index is None:
                 q_ = self.apply_rotary_pos_emb(
-                    pos_sin[:, :, key_len - query_len : key_len, :],
-                    pos_cos[:, :, key_len - query_len : key_len, :],
+                    pos_sin[:, :, key_len - query_len+start_pos : key_len+start_pos, :],
+                    pos_cos[:, :, key_len - query_len+start_pos : key_len+start_pos, :],
                     q_,
                 )
             else:
                 q_ = self.apply_rotary_pos_emb(
-                    pos_sin[:, :, block_end_index.item() - query_len : block_end_index.item(), :],
-                    pos_cos[:, :, block_end_index.item() - query_len : block_end_index.item(), :],
+                    pos_sin[:, :, block_end_index - query_len+start_pos : block_end_index+start_pos, :],
+                    pos_cos[:, :, block_end_index - query_len+start_pos : block_end_index+start_pos, :],
                     q_,
                 )
-            k_ = self.apply_rotary_pos_emb(pos_sin, pos_cos, k_)
+            k_ = self.apply_rotary_pos_emb(pos_sin[:, :, start_pos:], pos_cos[:, :, start_pos:], k_)
         return q_.type_as(q), k_.type_as(k)
 
 
@@ -525,12 +527,12 @@ def causal_attention_bias(seq_len: int, device: torch.device) -> torch.FloatTens
 def get_causal_attention_bias(cache: BufferCache, seq_len: int, device: torch.device) -> torch.Tensor:
     if (causal_bias := cache.get("causal_attention_bias")) is not None and causal_bias.shape[-1] >= seq_len:
         if causal_bias.device != device:
-            causal_bias = causal_bias.to(device)
-            cache["causal_attention_bias"] = causal_bias
-        return causal_bias
+            causal_bias = causal_bias.clone().to(device)
+            cache["causal_attention_bias"] = causal_bias.clone()
+        return causal_bias.clone()
     with torch.autocast(device.type, enabled=False):
         causal_bias = causal_attention_bias(seq_len, device)
-    cache["causal_attention_bias"] = causal_bias
+    cache["causal_attention_bias"] = causal_bias.clone()
     return causal_bias
 
 
@@ -690,6 +692,206 @@ class LLaDABlock(nn.Module):
                 is_causal=False,
             )
 
+
+    def attention_overlap(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        attention_bias: Optional[torch.Tensor] = None,
+        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache: bool = False,
+        replace_position: Optional[torch.Tensor] = None,
+        use_ring_attn: bool = True,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        x_normed = self.attn_norm(x) #x:torch.Size([2, 168, 4096])
+        if layer_past is None:
+            layer_past= torch.empty(0)
+            has_layer_past = False
+        else:
+            has_layer_past = True
+            
+            
+        assert self.q_norm is None and self.k_norm is None
+        use_all_to_all = True
+        fuse_comm = True
+        if use_ring_attn:
+            if fuse_comm:
+                v = self.v_proj(x_normed) #v:torch.Size([2, 168, 4096])
+                B, T, C = v.size()  # batch size, sequence length, d_model
+                # print("use ring")
+                world_size = dist.get_world_size()
+
+                k = self.k_proj(x_normed) #k:torch.Size([2, 168, 4096])
+
+                k = k.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads)
+                v = v.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads)        
+                kv = torch.stack([k, v], dim=0).contiguous()
+
+                # gathered_kv = [torch.empty_like(kv) for _ in range(world_size)]
+                # dist.all_gather(gathered_kv, kv)                   
+                # k, v = torch.cat(gathered_kv, dim=2).permute(0,1, 3, 2, 4).split(1, 0)
+                kv = kv.unsqueeze(0).repeat(world_size, 1, 1, 1, 1, 1).contiguous()            
+                gathered_kv = torch.empty((world_size, 2, B, T, self.config.effective_n_kv_heads, C // self.config.n_heads), device=v.device, dtype=v.dtype)
+                dist.all_to_all_single(gathered_kv, kv)            
+                k, v = gathered_kv.permute(1,2,4,0,3,5).flatten(3, 4).split(1, 0)
+                
+                k = k.squeeze(0)
+                v = v.squeeze(0)
+                                
+                q = self.q_proj(x_normed) #q:torch.Size([2, 168, 4096])       
+                q = q.view(B, T, self.config.n_heads, C // self.config.n_heads).transpose(1, 2)
+
+            elif use_all_to_all:
+                v = self.v_proj(x_normed) #v:torch.Size([2, 168, 4096])
+                B, T, C = v.size()  # batch size, sequence length, d_model
+                dtype = v.dtype            
+                # print("use ring")
+                v = v.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads)        
+                world_size = dist.get_world_size()
+                v = v.unsqueeze(0).repeat(world_size, 1, 1, 1, 1).contiguous()
+                
+                gathered_v = torch.empty((world_size, B, T, self.config.effective_n_kv_heads, C // self.config.n_heads), device=v.device, dtype=v.dtype)
+                # gathered_v = [torch.empty_like(v) for _ in range(world_size)]
+                comm_v = dist.all_to_all_single(gathered_v, v, async_op=False)            
+                k = self.k_proj(x_normed) #k:torch.Size([2, 168, 4096])
+                k = k.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads)
+                k = k.unsqueeze(0).repeat(world_size, 1, 1, 1, 1).contiguous()
+                gathered_k = torch.empty((world_size, B, T, self.config.effective_n_kv_heads, C // self.config.n_heads), device=k.device, dtype=k.dtype)
+                # gathered_k = [torch.empty_like(k) for _ in range(world_size)]
+                comm_k = dist.all_to_all_single(gathered_k, k, async_op=False)
+                q = self.q_proj(x_normed) #q:torch.Size([2, 168, 4096])       
+                q = q.view(B, T, self.config.n_heads, C // self.config.n_heads).transpose(1, 2)
+
+                # comm_v.wait()
+                v = gathered_v.permute(1,3,0,2,4).flatten(2, 3)
+                # gathered_v = torch.cat(gathered_v, dim=1)            
+                # comm_k.wait()
+                k = gathered_k.permute(1,3,0,2,4).flatten(2, 3)
+            else:
+                v = self.v_proj(x_normed) #v:torch.Size([2, 168, 4096])
+                B, T, C = v.size()  # batch size, sequence length, d_model
+                dtype = v.dtype       
+                world_size = dist.get_world_size()
+
+
+                v = v.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2).contiguous()
+                
+                # gathered_v = torch.empty((world_size, B, T, self.config.effective_n_kv_heads, C // self.config.n_heads), device=v.device, dtype=v.dtype)
+                gathered_v = [torch.empty_like(v) for _ in range(world_size)]
+                comm_v = dist.all_gather(gathered_v, v, async_op=False)   
+                # comm_v = dist.all_gather_into_tensor(gathered_v, v, async_op=True)   
+
+                k = self.k_proj(x_normed) #k:torch.Size([2, 168, 4096])
+                k = k.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2).contiguous()       
+                # gathered_k = torch.empty((world_size, B, T, self.config.effective_n_kv_heads, C // self.config.n_heads), device=k.device, dtype=k.dtype)
+                gathered_k = [torch.empty_like(k) for _ in range(world_size)]
+                comm_k = dist.all_gather(gathered_k, k, async_op=False)                
+                # comm_k = dist.all_gather_into_tensor(gathered_k, k, async_op=True)                
+                q = self.q_proj(x_normed) #q:torch.Size([2, 168, 4096])       
+                q = q.view(B, T, self.config.n_heads, C // self.config.n_heads).transpose(1, 2).contiguous()
+                
+                # comm_v.wait()
+                v = torch.cat(gathered_v, dim=2)
+
+                # comm_k.wait()
+                k = torch.cat(gathered_k, dim=2)
+        else:
+            q_ = self.q_proj(x_normed) #q:torch.Size([2, 168, 4096])       
+            B, T, C = q_.size()  # batch size, sequence length, d_model                      
+            q = q_.view(B, T, self.config.n_heads, C // self.config.n_heads).transpose(1, 2)
+            k = self.k_proj(x_normed).view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2)
+            v = self.v_proj(x_normed).view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2)
+  
+     
+        # print(q.shape, k.shape, v.shape)
+
+        prev_length = 0
+        if has_layer_past: 
+            # if len(layer_past)>2:
+            #     print(len(layer_past))
+            #     for data in layer_past:
+            #         print(data.shape)
+            past_key, past_value = layer_past
+            if replace_position is None:
+                new_k = torch.empty(k.shape[0], k.shape[1], past_key.shape[2]+k.shape[2], k.shape[3], device=k.device, dtype=k.dtype)
+                new_v = torch.empty(v.shape[0], v.shape[1], past_value.shape[2]+v.shape[2], v.shape[3], device=v.device, dtype=v.dtype)
+                prev_length = past_key.shape[-2]
+                new_k[:, :, :prev_length] = past_key
+                new_v[:, :, :prev_length] = past_value
+                new_k[:, :, prev_length:] = k
+                new_v[:, :, prev_length:] = v
+                k = new_k
+                v = new_v
+                # prev_length = past_key.shape[-2]
+                # k = torch.cat((past_key, k), dim=-2)
+                # v = torch.cat((past_value, v), dim=-2)
+            else:
+                # k shape is [B, n_kv_h, selected_length, hs]
+                # replace_position shape is [B, L], where L contains 0s and 1s, 0 means no replacement, 1 means replace, with selected_length number of 1s
+                # past_key shape is [B, n_kv_h, L, hs]
+                # Replace selected_length number of 1s in past_key with k
+                # Get the indices that need to be replaced
+                replace_indices = replace_position.nonzero(as_tuple=True)[1]  # [selected_length]
+                # Use scatter operation to perform replacement
+                past_key[:, :, replace_indices] = k
+                k = past_key
+                # Perform the same operation for value
+                past_value[:, :, replace_indices] = v
+                v = past_value
+
+
+
+        present = (k.clone(), v.clone()) if use_cache else None #present: None
+        query_len, key_len = q.shape[-2], k.shape[-2]  # could be different if layer_past not None
+
+        if self.config.rope:
+            # Apply rotary embeddings.
+            if dist.is_initialized and dist.get_world_size() > 1:
+                start_pos = prev_length + dist.get_rank() * q.shape[2]
+                end_pos = prev_length + (dist.get_rank()+1) * q.shape[2]
+                # print(dist.get_rank(), prev_length, q.shape, k.shape, end_pos)
+                assert replace_position is None
+                if replace_position is None:
+                    q, k = self.rotary_emb(q, k, end_pos)
+                else:
+                    q, k = self.rotary_emb(q, k, replace_indices.max()+1)
+            else:
+                if replace_position is None:
+                    q, k = self.rotary_emb(q, k)
+                else:
+                    q, k = self.rotary_emb(q, k, replace_indices.max()+1)
+
+        assert attention_bias is None
+
+        if self.flash_attn_func is not None:
+            # print(self.flash_attn_func)
+            r = self.flash_attn_func(
+                q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), \
+                    dropout_p=0.0 if not self.training else self.config.attention_dropout, causal=False
+            )
+            return r.transpose(1, 2)
+        elif use_ring_attn:
+
+            # gathered_k = torch.cat(gathered_k, dim=1)
+            # print(gathered_k.shape)
+            # print(q.shape, gathered_k.shape, gathered_v.shape)
+            att = FlashAttnFunc.apply(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+            att = att.contiguous().view(B, T, C)
+        else:
+            att = self._scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=None,
+                dropout_p=0.0 if not self.training else self.config.attention_dropout,
+                is_causal=False,
+            )
+            # Re-assemble all head outputs side-by-side.
+            att = att.transpose(1, 2).contiguous().view(B, T, C)
+
+        # Apply output projection.
+        return self.attn_out(att), present
+
     def attention(
         self,
         q: torch.Tensor,
@@ -700,6 +902,7 @@ class LLaDABlock(nn.Module):
         layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
         replace_position: Optional[torch.Tensor] = None,
+        use_ring_attn: bool = True,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, T, C = q.size()  # batch size, sequence length, d_model
         dtype = k.dtype
@@ -941,6 +1144,7 @@ class LLaDALlamaBlock(LLaDABlock):
         layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
         replace_position: Optional[torch.Tensor] = None,
+        use_ring_attn: bool = True,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Get query, key, value projections.
         # shape:
@@ -949,20 +1153,32 @@ class LLaDALlamaBlock(LLaDABlock):
         #                      k, v: (batch_size, seq_len, d_model // n_heads)
         #  - for group query attn q: (batch_size, seq_len, d_model)
         #                      k, v: (batch_size, seq_len, d_model // n_kv_heads)
-        x_normed = self.attn_norm(x) #x:torch.Size([2, 168, 4096])
-        q = self.q_proj(x_normed) #q:torch.Size([2, 168, 4096])
-        k = self.k_proj(x_normed) #k:torch.Size([2, 168, 4096])
-        v = self.v_proj(x_normed) #v:torch.Size([2, 168, 4096])
+        use_ring_attn = use_ring_attn and dist.is_initialized() and dist.get_world_size() > 1
+        
+        # print('llama_block')
+
         # attention_bias: None
         # layer_past: None
         # use_cache: False
         # Get attention scores.
         if self._activation_checkpoint_fn is not None:
+            x_normed = self.attn_norm(x) #x:torch.Size([2, 168, 4096])
+            k = self.k_proj(x_normed) #k:torch.Size([2, 168, 4096])
+            v = self.v_proj(x_normed) #v:torch.Size([2, 168, 4096])
+            q = self.q_proj(x_normed) #q:torch.Size([2, 168, 4096])            
             att, cache = self._activation_checkpoint_fn(  # type: ignore
                 self.attention, q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position
             )
         else:
-            att, cache = self.attention(q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position)
+            # print(use_ring_attn)
+            if use_ring_attn:
+                att, cache = self.attention_overlap(x, attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position, use_ring_attn=use_ring_attn)
+            else:
+                x_normed = self.attn_norm(x) #x:torch.Size([2, 168, 4096])
+                k = self.k_proj(x_normed) #k:torch.Size([2, 168, 4096])
+                v = self.v_proj(x_normed) #v:torch.Size([2, 168, 4096])
+                q = self.q_proj(x_normed) #q:torch.Size([2, 168, 4096])                  
+                att, cache = self.attention(q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position)
 
         # Add attention scores.
         # shape: (B, T, C)
@@ -1059,17 +1275,22 @@ class LLaDABlockDiffBlock(LLaDABlock):
         #                      k, v: (batch_size, seq_len, d_model // n_heads)
         #  - for group query attn q: (batch_size, seq_len, d_model)
         #                      k, v: (batch_size, seq_len, d_model // n_kv_heads)
-        x_normed = self.attn_norm(x)
-        q = self.q_proj(x_normed)
-        k = self.k_proj(x_normed)
-        v = self.v_proj(x_normed)
 
         # Get attention scores.
         if self._activation_checkpoint_fn is not None:
+            x_normed = self.attn_norm(x)
+            q = self.q_proj(x_normed)
+            k = self.k_proj(x_normed)
+            v = self.v_proj(x_normed)
+
             att, cache = self._activation_checkpoint_fn(  # type: ignore
                 self.attention, q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache
             )
         else:
+            x_normed = self.attn_norm(x)
+            q = self.q_proj(x_normed)
+            k = self.k_proj(x_normed)
+            v = self.v_proj(x_normed)            
             att, cache = self.attention(q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache)
 
         # Add attention scores.
@@ -1314,10 +1535,10 @@ class LLaDAModel(nn.Module):
             if alibi_bias.device != device:
                 alibi_bias = alibi_bias.to(device)
                 self.__cache["alibi_attention_bias"] = alibi_bias
-            return alibi_bias
+            return alibi_bias.clone()
         with torch.autocast(device.type, enabled=False):
             alibi_bias = alibi_attention_bias(seq_len, self.config, device)
-        self.__cache["alibi_attention_bias"] = alibi_bias
+        self.__cache["alibi_attention_bias"] = alibi_bias.clone()
         return alibi_bias
 
     def forward(
@@ -1405,42 +1626,42 @@ class LLaDAModel(nn.Module):
         else:
             attention_mask = None
 
-        # Merge attention mask with attention bias.
-        if (
-            attention_bias is not None
-            or attention_mask is not None
-            or self.config.alibi
-            # NOTE (epwalsh): we need to initialize the attn bias in order for attn to work properly
-            # with key+value cache. Otherwise `F.scaled_dot_product_attention()` doesn't seem to compute
-            # scores correctly.
-            or past_key_values is not None
-        ):
-            if attention_bias is None and self.config.alibi:
-                attention_bias = get_causal_attention_bias(
-                    self.__cache, past_length + seq_len, x.device
-                ) + self.get_alibi_attention_bias(past_length + seq_len, x.device)
-            elif attention_bias is None:
-                attention_bias = get_causal_attention_bias(self.__cache, past_length + seq_len, x.device)
-            elif attention_bias.dtype in (torch.int8, torch.bool):
-                attention_bias = attention_bias.to(dtype=torch.float)
-                attention_bias.masked_fill_(attention_bias == 0.0, torch.finfo(attention_bias.dtype).min)
+        # # Merge attention mask with attention bias.
+        # if (
+        #     attention_bias is not None
+        #     or attention_mask is not None
+        #     or self.config.alibi
+        #     # NOTE (epwalsh): we need to initialize the attn bias in order for attn to work properly
+        #     # with key+value cache. Otherwise `F.scaled_dot_product_attention()` doesn't seem to compute
+        #     # scores correctly.
+        #     or past_key_values is not None
+        # ):
+        #     if attention_bias is None and self.config.alibi:
+        #         attention_bias = get_causal_attention_bias(
+        #             self.__cache, past_length + seq_len, x.device
+        #         ) + self.get_alibi_attention_bias(past_length + seq_len, x.device)
+        #     elif attention_bias is None:
+        #         attention_bias = get_causal_attention_bias(self.__cache, past_length + seq_len, x.device)
+        #     elif attention_bias.dtype in (torch.int8, torch.bool):
+        #         attention_bias = attention_bias.to(dtype=torch.float)
+        #         attention_bias.masked_fill_(attention_bias == 0.0, torch.finfo(attention_bias.dtype).min)
 
-            # Transform to the right shape and data type.
-            mask_len = seq_len
-            if attention_mask is not None:
-                mask_len = attention_mask.shape[-1]
-            elif past_key_values is not None:
-                mask_len = past_key_values[0][0].shape[-2] + seq_len
-            attention_bias = attention_bias[:, :, :mask_len, :mask_len].to(dtype=torch.float)
+        #     # Transform to the right shape and data type.
+        #     mask_len = seq_len
+        #     if attention_mask is not None:
+        #         mask_len = attention_mask.shape[-1]
+        #     elif past_key_values is not None:
+        #         mask_len = past_key_values[0][0].shape[-2] + seq_len
+        #     attention_bias = attention_bias[:, :, :mask_len, :mask_len].to(dtype=torch.float)
 
-            # Add in the masking bias.
-            if attention_mask is not None:
-                attention_bias = attention_bias + attention_mask
-                # Might get -infs after adding attention mask, since dtype.min + dtype.min = -inf.
-                # `F.scaled_dot_product_attention()` doesn't handle -inf like you'd expect, instead
-                # it can produce NaNs.
-                ensure_finite_(attention_bias, check_neg_inf=True, check_pos_inf=False)
-
+        #     # Add in the masking bias.
+        #     if attention_mask is not None:
+        #         attention_bias = attention_bias + attention_mask
+        #         # Might get -infs after adding attention mask, since dtype.min + dtype.min = -inf.
+        #         # `F.scaled_dot_product_attention()` doesn't handle -inf like you'd expect, instead
+        #         # it can produce NaNs.
+        #         ensure_finite_(attention_bias, check_neg_inf=True, check_pos_inf=False)
+        attention_bias = None
         attn_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = [] if use_cache else None
 
         # decoder layers
@@ -1549,8 +1770,7 @@ class LLaDAModelLM(PreTrainedModel):
 
         if not model:
             model_config = create_model_config_from_pretrained_config(config)
-            # Initialize model (always on CPU to start with so we don't run out of GPU memory).
-            model_config.init_device = "cpu"
+            model_config.init_device = "cuda"
             self.model = LLaDAModel(model_config, init_params=init_params)
         else:
             self.model = model
