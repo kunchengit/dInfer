@@ -1,3 +1,13 @@
+#!/usr/bin/python
+#****************************************************************#
+# ScriptName: generate_dist.py
+# Author: dulun.dl
+# Create Date: 2025-07-29 13:14
+# Modify Author: $SHTERM_REAL_USER@alibaba-inc.com
+# Modify Date: 2025-07-29 13:14
+# Function: 
+#***************************************************************#
+
 # Copyright 2025 NVIDIA CORPORATION & AFFILIATES
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

@@ -7,7 +7,7 @@ import os
 from transformers import AutoTokenizer, AutoModel
 from model.modeling_llada import LLaDAModelLM
 import torch.distributed as dist
-from generate import generate_with_cache, generate_dist, generate_block_cache
+from generate.generate_dist import generate_with_cache, generate_dist, generate_block_cache
 import time
 import tqdm
 
