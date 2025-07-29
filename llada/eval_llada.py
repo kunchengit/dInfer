@@ -39,7 +39,8 @@ from tqdm import tqdm
 import os
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 from generate.generate_hierarchy import generate, generate_with_prefix_cache, generate_with_dual_cache, generate_fast
-from model.modeling_llada import LLaDAModelLM
+#from model.modeling_llada import LLaDAModelLM
+from model.modeling_llada_origin import LLaDAModelLM
 import json
 import time
 import datasets
