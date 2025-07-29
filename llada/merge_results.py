@@ -2,7 +2,7 @@ import functools
 import os
 import json
 from tqdm import tqdm
-from llada.postprocess_code import eval_code
+from postprocess_code import eval_code
 import glob
 import csv
 import argparse
@@ -29,8 +29,8 @@ def parse_args():
 
 def process_results(root_dir: str):
     for dirpath, dirnames, filenames in tqdm(os.walk(root_dir), desc='merging results...'):
-        if 'Instruct' in dirpath:
-            continue
+        # if 'Instruct' in dirpath:
+        #     continue
         print(f"当前目录: {dirpath}")
         afcpt = 0
         afcpt_file = os.path.join(dirpath, 'afcpt.json')

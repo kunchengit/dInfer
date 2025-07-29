@@ -18,7 +18,7 @@
 import evaluate as hf_evaluate
 import os
 import sys
-from llada.sanitize import sanitize
+from sanitize import sanitize
 
 os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 pass_at_k = hf_evaluate.load("code_eval")
