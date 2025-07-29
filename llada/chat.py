@@ -20,7 +20,8 @@ import argparse
 
 from generate.generate_hierarchy import generate, generate_with_prefix_cache, generate_with_dual_cache
 from transformers import AutoTokenizer, AutoModel
-from model.modeling_llada import LLaDAModelLM
+#from model.modeling_llada import LLaDAModelLM
+from model.modeling_llada_origin import LLaDAModelLM
 
 def chat(args):
     device = 'cuda'
