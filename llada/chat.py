@@ -18,7 +18,7 @@
 import torch
 import argparse
 
-from generate import generate, generate_with_prefix_cache, generate_with_dual_cache
+from generate.generate_origin import generate, generate_with_prefix_cache, generate_with_dual_cache
 from transformers import AutoTokenizer, AutoModel
 from model.modeling_llada import LLaDAModelLM
 
