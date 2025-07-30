@@ -33,7 +33,7 @@ def submit_single_job(script_file, mount_command, **kwargs):
     else: 
       memory = 102400 * gpu_num # 100GB per GPU
 
-    workdir = r"/workspace/bin/Fastdllm"
+    workdir = r"/workspace/bin/Fast-dllm"
     script_dir = os.path.join (workdir, "scripts")
     base_user_command = (
       r"export HF_ALLOW_CODE_EVAL=1 && ",

@@ -8,7 +8,22 @@ remask_threshold=0.001
 low_threshold=0.5
 
 
-echo yes > /mnt/dllm/dulun.dl/dllm_decoding/test.log
+task=humaneval
+time_stamp=$(date +%s)
 
+if [[ "${model_path}" == *"LLaDA-1.5"* ]]; then
+  model="LLaDA-1.5"
+elif [[ "${model_path}" == *"LLaDA-8B-Instruct"* ]]; then
+  model="LLaDA-8B-Instruct"
+elif [[ "${model_path}" == *"LLaDA-8B-Base"* ]]; then
+  model="LLaDA-8B-Base"
+else
+  model="LLaDA-unknown-version"
+fi
 
+output_dir=/mnt/dllm/dulun.dl/dllm_decoding/evals_results/${task}/${model}/genlen${length}/blk${block_length}/${decoding}/${time_stamp}
 
+accelerate launch eval_llada.py --tasks ${task} \
+--confirm_run_unsafe_code --model llada_dist \
+--model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},threshold=${threshold},low_threshold=${low_threshold},remask_threshold=${remask_threshold},factor=${factor},show_speed=True,save_dir=${output_path},decoding=${decoding} \
+--output_path ${output_path} --log_samples
