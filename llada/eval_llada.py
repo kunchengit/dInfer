@@ -109,6 +109,7 @@ class LLaDAEvalHarness(LM):
         model_kwargs = {}
         if self.accelerator is not None:
             model_kwargs.update({'device_map': {'': f'{self.accelerator.device}'}})
+        
         config = AutoConfig.from_pretrained(model_path)
         config.flash_attention = True
         self.model = LLaDAModelLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.bfloat16, config=config, **model_kwargs)
