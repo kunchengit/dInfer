@@ -57,6 +57,38 @@ def get_num_transfer_tokens(mask_index, steps):
     return num_transfer_tokens
 
 
+def generate_fastdllm (model, prompt, steps=128, gen_length=128, block_length=128, temperature=0., mask_id=126336, decoding="fastdllm", **kwargs):
+    '''
+    Args:
+        model: Mask predictor.
+        prompt: A tensor of shape (1, L).
+        steps: Sampling steps, less than or equal to gen_length.
+        gen_length: Generated answer length.
+        block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
+        temperature: Categorical distribution sampling temperature.
+        cfg_scale: Unsupervised classifier-free guidance scale.
+        remasking: Remasking strategy. 'low_confidence' or 'random'.
+        mask_id: The toke id of [MASK] is 126336.
+    '''
+
+    use_cache = kwargs.get("use_cache", False)
+    dual_cache = kwargs.get("dual_cache", False)
+    remasking = kwargs.get('remasking', 'low_confidence') 
+    threshold = kwargs.get('threshold', None)
+    factor = kwargs.get('factor', None)
+
+
+    if use_cache:
+        if dual_cache:
+            generated_answer, nfe = generate_with_dual_cache(model, prompt, steps, gen_length, block_length, temperature, remasking, 
+                mask_id, threshold, factor)
+        else:
+            generated_answer, nfe = generate_with_prefix_cache(model, prompt, steps, gen_length, block_length, temperature, remasking, 
+                mask_id, threshold, factor)
+    else:
+        generated_answer, nfe = generate(model, prompt, steps, gen_length, block_length, temperature, remasking, mask_id, threshold, factor)
+
+
 @ torch.no_grad()
 def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
              remasking='low_confidence', mask_id=126336, threshold=None, factor=None):

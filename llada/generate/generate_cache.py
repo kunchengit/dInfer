@@ -46,9 +46,7 @@ def get_num_transfer_tokens(mask_index, steps):
 
 @torch.no_grad()
 def generate_with_prefixcache_update(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-                cfg_scale=0., factor=None,
-                remasking='low_confidence', mask_id=126336,
-                log_flops=False, threshold=None, cache_update_iter=None, eos_early_stop=False, minimal_topk=1):
+                mask_id=126336, log_flops=False, threshold=None, cache_update_iter=None, eos_early_stop=False, minimal_topk=1, **kwargs):
 
     '''
     force update cache in some iters.
@@ -60,10 +58,16 @@ def generate_with_prefixcache_update(model, prompt, steps=128, gen_length=128, b
         gen_length: Generated answer length.
         block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         temperature: Categorical distribution sampling temperature.
-        cfg_scale: Unsupervised classifier-free guidance scale.
-        remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
     '''
+    log_flops = kwargs.get("log_flops", False)
+    threshold = kwargs.get("threshold", None)
+    cache_update_iter = kwargs.get("cache_update_iter", None)
+    eos_early_stop = kwargs.get("eos_early_stop", False)
+    minimal_topk = kwargs.get("minimal_topk", 1)
+
+
+
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
 
@@ -189,7 +193,7 @@ def get_transfer_index_opt(logits, mask_index, x, block_end, num_transfer_tokens
         confidence = torch.where(mask_index, x0_p, -np.inf)
     else:
         raise NotImplementedError(remasking)
-         
+
     transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
     if threshold is not None:
         num_transfer_tokens = mask_index.sum(dim=1, keepdim=True)

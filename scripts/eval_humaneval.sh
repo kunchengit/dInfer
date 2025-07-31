@@ -32,5 +32,6 @@ cd ../llada
 
 accelerate launch eval_llada.py --tasks ${task} \
 --confirm_run_unsafe_code --model llada_dist \
---model_args model_path=${model_path},gen_length=${length},steps=${steps},block_length=${block_length},threshold=${threshold},low_threshold=${low_threshold},remask_threshold=${remask_threshold},factor=${factor},show_speed=True,save_dir=${output_path},decoding=${decoding} \
+--model_args model_path=${model_path},
+gen_length=${length},steps=${steps},block_length=${block_length},threshold=${threshold},low_threshold=${low_threshold},remask_threshold=${remask_threshold},factor=${factor},show_speed=True,save_dir=${output_path},decoding=${decoding} \
 --output_path ${output_path} --log_samples
