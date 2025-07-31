@@ -18,9 +18,9 @@ def submit_single_job(script_file, mount_command, **kwargs):
     app_name = kwargs.get('app_name', 'graphhuanan')
     gpu_type = kwargs.get('gpu_type', 'h20-3e')
     priority = kwargs.get('priority', 'high')
-    gpu_num = kwargs.get('gpu_num', 1)
+    gpu_num = kwargs.get('gpu_num', 8)
     pod_num = kwargs.get('pod_num', 1)
-    max_workers = kwargs.get('max_workers', 1)
+    max_workers = kwargs.get('max_workers', 8)
     branch = kwargs.get('branch', 'master')
 
     image = kwargs.get("image", "reg.docker.alibaba-inc.com/aii/aistudio:12910142-20250729192318")
@@ -36,10 +36,6 @@ def submit_single_job(script_file, mount_command, **kwargs):
     workdir = r"/workspace/bin/Fast-dllm"
     script_dir = os.path.join (workdir, "scripts")
     base_user_command = (
-      r"export HF_ALLOW_CODE_EVAL=1 && ",
-      r"export HF_DATASETS_TRUST_REMOTE_CODE=true && ",
-      r"export HF_DATASETS_OFFLINE=1 && ",
-      r"export HF_EVALUATE_OFFLINE=1 && ",
       r"mkdir /mnt/dllm && ",
       f"{mount_command} && ",
       r"cp /mnt/dllm/dulun.dl/dllm_decoding/huggingface.zip ~/.cache && ",

@@ -1,3 +1,9 @@
+export HF_ALLOW_CODE_EVAL=1
+export HF_DATASETS_TRUST_REMOTE_CODE=true
+export HF_DATASETS_OFFLINE=1
+export HF_EVALUATE_OFFLINE=1
+
+
 decoding=origin # or herachical_fast_v2 or herachical_remasking
 length=256 # generate length
 block_length=32
@@ -22,6 +28,7 @@ else
 fi
 
 output_dir=/mnt/dllm/dulun.dl/dllm_decoding/evals_results/${task}/${model}/genlen${length}/blk${block_length}/${decoding}/${time_stamp}
+cd ../llada
 
 accelerate launch eval_llada.py --tasks ${task} \
 --confirm_run_unsafe_code --model llada_dist \
