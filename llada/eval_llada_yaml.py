@@ -84,6 +84,7 @@ def main():
       #raise TypeError(r"Unsupported task: 'task'")
       continue
     
+    subprocess.run([ext_cmd], check = True)
     task_list.append(task)
     path_list.append(output_path)
   
