@@ -27,7 +27,7 @@ else
   model="LLaDA-unknown-version"
 fi
 
-output_dir=/mnt/dllm/dulun.dl/dllm_decoding/evals_results/${task}/${model}/genlen${length}/blk${block_length}/${decoding}/${time_stamp}
+output_path=/mnt/dllm/dulun.dl/dllm_decoding/evals_results/${task}/${model}/genlen${length}/blk${block_length}/${decoding}/${time_stamp}
 cd ../llada
 
 accelerate launch eval_llada.py --tasks ${task} \
