@@ -24,6 +24,7 @@ def parse_args():
         description='tools to process and merge results')
     parser.add_argument('--type', help='The type of operation', type=str)
     parser.add_argument('--res_dir', help='The dir of the inference output', type=str)
+    parser.add_argument('--model', help='The model used to generate', type=str, required=False)
     args = parser.parse_args()
     return args
 
@@ -127,18 +128,17 @@ def extract_from_afcpt_json(path):
     tps_our = data.get("tokens per second our")
     return avg_calls, tps, tps_our
 
-def extract_summary(root="hierarchy_decoding", output="summary.csv"):
+def extract_summary(root="hierarchy_decoding", output="summary.csv", model="__root__GSAI-ML__LLaDA-8B-Instruct"):
     rows = []
     for type_dir in glob.glob(os.path.join(root, "*")):
         if not os.path.isdir(type_dir): continue
         for task_dir in glob.glob(os.path.join(type_dir, "*")):
             for param_dir in glob.glob(os.path.join(task_dir, "*")):
-                instruct_dir = os.path.join(param_dir, "__root__GSAI-ML__LLaDA-8B-Instruct")
+                instruct_dir = os.path.join(param_dir, model)
                 if not os.path.isdir(instruct_dir): continue
-                try:
-                    type_, task, length, block_length, threshold, low_threshold, remask_threshold = parse_dir_name(param_dir)
-                except Exception as e:
-                    continue
+                
+                type_, task, length, block_length, threshold, low_threshold, remask_threshold = parse_dir_name(param_dir)
+                
                 results_json = find_results_json(instruct_dir)
                 afcpt_json = find_afcpt_json(param_dir)
 
@@ -175,13 +175,14 @@ def extract_summary(root="hierarchy_decoding", output="summary.csv"):
 
 def main():
     args = parse_args()
-    if args.type == 'process_results':
+    model = args.model if args.model is not None else "__root__GSAI-ML__LLaDA-8B-Instruct"
+    if args.type == 'process':
         process_results(args.res_dir)
-    elif args.type == 'extract_summary':
-        extract_summary(args.res_dir)
+    elif args.type == 'summary':
+        extract_summary(args.res_dir, model=model)
     elif args.type == 'process_and_summary':
         process_results(args.res_dir)
-        extract_summary(args.res_dir)
+        extract_summary(args.res_dir, model=model)
     else:
         raise ValueError('unimplemented type')
 
