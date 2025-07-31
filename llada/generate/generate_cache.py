@@ -1,20 +1,3 @@
-# Copyright 2025 NVIDIA CORPORATION & AFFILIATES
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-# Modified from LLaDA repos: https://github.com/ML-GSAI/LLaDA
-
 from functools import partial
 import math
 import torch
@@ -206,19 +189,7 @@ def get_transfer_index_opt(logits, mask_index, x, block_end, num_transfer_tokens
         confidence = torch.where(mask_index, x0_p, -np.inf)
     else:
         raise NotImplementedError(remasking)
-    # if remasking == 'low_confidence':
-    #     p = F.softmax(logits, dim=-1)
-    #     x0_p = torch.squeeze(
-    #         torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1)  # b, l
-    # elif remasking == 'random':
-    #     x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
-    # else:
-    #     raise NotImplementedError(remasking)
-
-    # x0_p[:, block_end:] = -np.inf
-
-    # x0 = torch.where(mask_index, x0, x)
-    # confidence = torch.where(mask_index, x0_p, -np.inf)    
+         
     transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
     if threshold is not None:
         num_transfer_tokens = mask_index.sum(dim=1, keepdim=True)
@@ -231,27 +202,6 @@ def get_transfer_index_opt(logits, mask_index, x, block_end, num_transfer_tokens
                 if confidence[j, select_index[k]] < threshold:
                     transfer_index[j, select_index[k]] = False
     return x0, transfer_index
-
-# def main():
-#     device = 'cuda'
-
-#     model = LLaDAModelLM.from_pretrained('GSAI-ML/LLaDA-8B-Instruct', trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
-#     tokenizer = AutoTokenizer.from_pretrained('GSAI-ML/LLaDA-8B-Instruct', trust_remote_code=True)
-
-#     prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she runs 6 kilometers per hour. How many kilometers can she run in 8 hours?"
-
-#     # Add special tokens for the Instruct model. The Base model does not require the following two lines.
-#     m = [{"role": "user", "content": prompt}, ]
-#     prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
-
-#     input_ids = tokenizer(prompt)['input_ids']
-#     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
-
-#     out = generate_with_dual_cache(model, input_ids, steps=128, gen_length=128, block_length=32, temperature=0., remasking='low_confidence')
-#     print(tokenizer.batch_decode(out[0][:, input_ids.shape[1]:], skip_special_tokens=True)[0])
-
-# if __name__ == '__main__':
-#     main()
 
 
 
