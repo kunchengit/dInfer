@@ -54,6 +54,9 @@
 - `remask_threshold`: 
 
 ## Other Parameters
+- `length`: int (default: 256)
+- `block_length`: int (default: 32)
+- `steps`:  int (default: 128)
 - `show_speed`: boolean (default: False)
 - `log_generated_items`: boolean (default: False)
 - `summary_output`: String (default: 'summary.csv')

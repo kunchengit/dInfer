@@ -54,7 +54,7 @@ def process_results(root_dir: str):
                     humaneval_result = eval_code(file_path)
                     results["results"]["humaneval"]["post_process_pass@1"] = humaneval_result
                     with open(results_file, 'w', encoding='utf-8') as rfile:
-                        rfile.write(json.dumps(results, ensure_ascii=False))
+                        rfile.write(json.dumps(results, ensure_ascii=False, indent=4))
         if afcpt != 0:
             with open(afcpt_file, 'w', encoding='utf-8') as f:
                 data = {'average forward calls per token': afcpt / rank_num}
@@ -85,7 +85,7 @@ def extract_from_results_json(path):
         if 'gsm8k' in data["results"]:
             val = data["results"]["gsm8k"]["exact_match,flexible-extract"]
         elif 'humaneval' in data["results"]:
-            val = data["results"]["humaneval"]["post_process_pass@1"]
+            val = data["results"]["humaneval"]["post_process_pass@1"] if "post_process_pass@1" in  data["results"]["humaneval"] else  data["results"]["humaneval"]["pass@1,create_test"] 
         elif 'minerva_math' in data["results"]:
             val = data["results"]["minerva_math"]["math_verify,none"]
         elif 'mbpp' in data["results"]:
