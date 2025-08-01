@@ -167,25 +167,25 @@ def main():
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
-        --output_path {output_path} --log_samples"""
+        --output_path {output_path}"""
     elif task == "minerva_math":
       num_fewshot = cfg.get('num_fewshot', 4)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
-        --output_path {output_path} --log_samples"""
+        --output_path {output_path}"""
     elif task == "mbpp":
       num_fewshot = cfg.get('num_fewshot', 3)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
-        --output_path {output_path} --log_samples"""
+        --output_path {output_path}"""
     elif task == "bbh":
       num_fewshot = cfg.get('num_fewshot', 3)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
-        --output_path {output_path} --log_samples"""
+        --output_path {output_path}"""
     else:
       #raise TypeError(r"Unsupported task: 'task'")
       continue
