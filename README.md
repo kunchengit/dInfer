@@ -3,7 +3,7 @@
 ### Preparation
 - Image selection: reg.docker.alibaba-inc.com/aii/aistudio:12910142-20250729192318
 - NAS DIR: dllm (50T)
-  - ```bash
+  ```bash
     mkdir /mnt/dllm
     {mount_command}
     cp /mnt/dllm/dulun.dl/dllm_decoding/huggingface.zip ~/.cache
@@ -14,23 +14,23 @@
   - mount cmd is confidential, please reach out to dulun.dl for usage
 ### Execution
 - A usage case for yaml mode:
-```bash
-cd {Fastdllm repo path}/llada
-python eval_llada_yaml.py -y fastdll_humaneval.yaml
-```
+	```bash
+		cd {Fastdllm repo path}/llada
+		python eval_llada_yaml.py -y fastdll_humaneval.yaml
+	```
 - A usage case for scripts
 
 ## Job Submission
 - A usage case for yaml mode:
-```bash
-cd {Fastdllm repo path}/job_submit
-python llada_eval_job.py --yaml fastdll_humaneval.yaml
-```
+	```bash
+		cd {Fastdllm repo path}/job_submit
+		python llada_eval_job.py --yaml fastdll_humaneval.yaml
+	```
 - A usage case for script mode:
-```bash
-cd {Fastdllm repo path}/job_submit
-python llada_eval_job.py --script eval_humaneval.py
-```
+	```bash
+		cd {Fastdllm repo path}/job_submit
+		python llada_eval_job.py --script eval_humaneval.py
+	```
 
 # Decoding Parameters
 ## Fastdllm
