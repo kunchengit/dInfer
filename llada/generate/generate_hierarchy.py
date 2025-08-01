@@ -61,9 +61,9 @@ def generate_hierarchy(model, prompt, steps=128, gen_length=128, block_length=12
 
     if decoding == "origin":
         get_transfer_index_cur = get_transfer_index
-    elif decoding == "hierachy_fast_v2":
+    elif decoding == "hierarchy_fast_v2":
         get_transfer_index_cur = partial (get_transfer_index_hierarchy_fast_v2, low_threshold = kwargs["low_threshold"])
-    elif decoding == "hierachy_remasking":
+    elif decoding == "hierarchy_remasking":
         get_transfer_index_cur = partial (get_transfer_index_hierarchy_remask, low_threshold = kwargs["low_threshold"], remask_threshold = kwargs ["remask_threshold"])
     else:
         raise NotImplementedError (decoding)

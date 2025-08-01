@@ -106,50 +106,6 @@ def extract_from_afcpt_json(path):
     tps_our = data.get("tokens per second our")
     return avg_calls, tps, tps_our
 
-def extract_summary(root="hierarchy_decoding", output="summary.csv", model="__root__GSAI-ML__LLaDA-8B-Instruct"):
-    rows = []
-    for type_dir in glob.glob(os.path.join(root, "*")):
-        if not os.path.isdir(type_dir): continue
-        for task_dir in glob.glob(os.path.join(type_dir, "*")):
-            for param_dir in glob.glob(os.path.join(task_dir, "*")):
-                instruct_dir = os.path.join(param_dir, model)
-                if not os.path.isdir(instruct_dir): continue
-                
-                type_, task, length, block_length, threshold, low_threshold, remask_threshold = parse_dir_name(param_dir)
-                
-                results_json = find_results_json(instruct_dir)
-                afcpt_json = find_afcpt_json(param_dir)
-
-                exact_match_flex = extract_from_results_json(results_json) if results_json else None
-                avg_calls, tps, tps_our = (extract_from_afcpt_json(afcpt_json) if afcpt_json else (None, None, None))
-
-                rows.append({
-                    "type": type_,
-                    "task": task,
-                    "length": length,
-                    "block_length": block_length,
-                    "threshold": threshold,
-                    "low_threshold": low_threshold,
-                    "remask_threshold": remask_threshold,
-                    "exact_match,flexible-extract": exact_match_flex,
-                    "average forward calls per token": avg_calls,
-                    "tokens per second": tps,
-                    "tokens per second our": tps_our,
-                })
-
-    # 写入CSV
-    with open(output, "w", newline="") as csvfile:
-        fieldnames = [
-            "type", "task", "length", "block_length", "threshold", "low_threshold", "remask_threshold",
-            "exact_match,flexible-extract",
-            "average forward calls per token", "tokens per second", "tokens per second our"
-        ]
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-    print(f"Summary saved to {output}")
-
 
 def main():
 
@@ -205,22 +161,26 @@ def main():
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \\
         --output_path {output_path} --log_samples"""
     elif task == "gsm8k":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
+      num_fewshot = cfg.get('num_fewshot', 5)
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
         --output_path {output_path} --log_samples"""
     elif task == "minerva_math":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
+      num_fewshot = cfg.get('num_fewshot', 4)
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
         --output_path {output_path} --log_samples"""
     elif task == "mbpp":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \\
+      num_fewshot = cfg.get('num_fewshot', 3)
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
         --output_path {output_path} --log_samples"""
     elif task == "bbh":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
+      num_fewshot = cfg.get('num_fewshot', 3)
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
         --output_path {output_path} --log_samples"""
