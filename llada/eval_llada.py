@@ -27,25 +27,44 @@ import numpy as np
 import torch.nn.functional as F
 from datasets import Dataset
 from tqdm import tqdm
-from lm_eval.api.model import LM
 import accelerate
 import random
 import numpy as np
+import json
+import time
+import datasets
+import json
+import time
+import datasets
+from tqdm import tqdm
+import os
+from transformers import AutoTokenizer, AutoModel, AutoConfig
+
+from lm_eval.api.model import LM
 from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
-from tqdm import tqdm
-import os
-from transformers import AutoTokenizer, AutoModel, AutoConfig
-from generate.generate_hierarchy import generate, generate_with_prefix_cache, generate_with_dual_cache, generate_fast
+
+
+from generate.generate_hierarchy import generate_hierarchy
+from generate.generate_cache import generate_with_prefixcache_update
+from generate.generate_fastdllm import generate_fastdllm
 #from model.modeling_llada import LLaDAModelLM
 from model.modeling_llada_origin import LLaDAModelLM
-import json
-import time
-import datasets
+
 datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
 datasets.config.DOWNLOAD_TIMEOUT = 180  # 单位为秒，默认是10
+
+def decoding_mapping (decoding):
+    if decoding == "prefix_cache":
+        return generate_with_prefixcache_update
+    elif decoding in {"hierarchy_fast_v2", "hierarchy_remasking"}:
+        return generate_hierarchy
+    elif decoding == "fastdllm":
+        return generate_fastdllm
+    else:
+        raise NotImplementedError(decoding)
 
 
 def set_seed(seed):
@@ -70,15 +89,10 @@ class LLaDAEvalHarness(LM):
         steps=1024,
         gen_length=1024,
         block_length=1024,
-        remasking='low_confidence',
         device="cuda",
-        use_cache=False,
-        threshold=None,
-        factor=None,
         save_dir=None,
         show_speed=False,
-        dual_cache=False,
-        decoding = "origin",
+        decoding = "fastdllm",
         **kwargs,
     ):
         '''
@@ -139,16 +153,12 @@ class LLaDAEvalHarness(LM):
         self.steps = steps
         self.gen_length = gen_length
         self.block_length = block_length
-        self.remasking = remasking
-        self.use_cache = use_cache
-        self.threshold = threshold
-        self.factor = factor
         self.is_instruct = True if 'instruct' in model_path.lower() else False
         self.save_dir = save_dir
         self.show_speed = show_speed
-        self.dual_cache = dual_cache
 
         self.decoding = decoding
+        self.generate_func = decoding_mapping(decoding) 
         self.kwargs = kwargs
     @property
     def rank(self):
@@ -324,17 +334,9 @@ class LLaDAEvalHarness(LM):
 
             stop_tokens = req.args[1]['until']
             input_ids = torch.tensor(input_ids).to(self.device).unsqueeze(0)
-            if self.use_cache:
-                if self.dual_cache:
-                    generated_answer, nfe = generate_with_dual_cache(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
-                                        temperature=0, remasking=self.remasking, mask_id=self.mask_id, threshold=self.threshold, factor=self.factor)
-                else:
-                    generated_answer, nfe = generate_with_prefix_cache(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
-                                        temperature=0, remasking=self.remasking, mask_id=self.mask_id, threshold=self.threshold, factor=self.factor)
-            else:
-                generated_answer, nfe = generate_fast(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
-                                        temperature=0, remasking=self.remasking, mask_id=self.mask_id, threshold=self.threshold, factor=self.factor,
-                                        decoding = self.decoding, **self.kwargs)
+            
+            generated_answer, nfe = self.generate_func(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
+                                        temperature=0, mask_id=self.mask_id, decoding = self.decoding, **self.kwargs)
 
             if self.is_instruct and 'task_id' in req.doc and str(req.doc['task_id']).lower().startswith('humaneval'):
                 if self.show_speed:

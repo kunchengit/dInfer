@@ -1,38 +1,26 @@
-import functools
+import yaml
 import os
+import subprocess
+import argparse
+from pathlib import Path
+from datetime import datetime
 import json
 from tqdm import tqdm
 from postprocess_code import eval_code
 import glob
 import csv
-import argparse
+
+CURRENT_DIR = Path(__file__).resolve().parent
+YAML_DIR = CURRENT_DIR.parent / 'yamls'
 os.environ['HF_DATASETS_OFFLINE']='1'
 os.environ['HF_EVALUATE_OFFLINE']='1'
-def count_forward_calls(forward):
-    """A decorator for counting the number of calls to the model's forward method."""
-    @functools.wraps(forward)
-    def wrapper(self, *args, **kwargs):
-        if not hasattr(self, '_forward_call_count'):
-            self._forward_call_count = 0
-        self._forward_call_count += 1
-        return forward(self, *args, **kwargs)
-    return wrapper
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description='tools to process and merge results')
-    parser.add_argument('--type', help='The type of operation', type=str)
-    parser.add_argument('--res_dir', help='The dir of the inference output', type=str)
-    parser.add_argument('--model', help='The model used to generate', type=str, required=False)
-    args = parser.parse_args()
-    return args
 
 def process_results(root_dir: str):
     for dirpath, dirnames, filenames in tqdm(os.walk(root_dir), desc='merging results...'):
         # if 'Instruct' in dirpath:
         #     continue
-        print(f"当前目录: {dirpath}")
+        # print(f"当前目录: {dirpath}")
         afcpt = 0
         afcpt_file = os.path.join(dirpath, 'afcpt.json')
         rank_num = 0
@@ -58,17 +46,15 @@ def process_results(root_dir: str):
             if 'results' in filename:
                 results_file = os.path.join(dirpath, filename)
             if 'samples_humaneval' in filename:
-                humaneval_result = eval_code(file_path)
                 if results_file is not None:
                     with open(results_file, 'r', encoding='utf-8') as rfile:
                         results = json.load(rfile)
+                    if "post_process_pass@1" in results["results"]["humaneval"]:
+                        continue
+                    humaneval_result = eval_code(file_path)
                     results["results"]["humaneval"]["post_process_pass@1"] = humaneval_result
                     with open(results_file, 'w', encoding='utf-8') as rfile:
                         rfile.write(json.dumps(results, ensure_ascii=False))
-            # else:
-            #     with open(file_path, 'r', encoding='utf-8') as in_file, open(results_file, 'a', encoding='utf-8') as out_file:
-            #         for line in in_file:
-            #             out_file.write(line)
         if afcpt != 0:
             with open(afcpt_file, 'w', encoding='utf-8') as f:
                 data = {'average forward calls per token': afcpt / rank_num}
@@ -83,21 +69,13 @@ def process_results(root_dir: str):
                 f.write(json.dumps(data, ensure_ascii=False) + '\n')
 
 
-def parse_dir_name(dir_path):
-    # 解析目录名
-    # .../hierarchy_decoding/type/task/length_blocklength_threshold_lowthreshold_remaskthreshold
-    parts = dir_path.strip(os.sep).split(os.sep)
-    type_, task, params = parts[-3], parts[-2], parts[-1]
-    length, block_length, threshold, low_threshold, remask_threshold = params.split("_")
-    return type_, task, length, block_length, threshold, low_threshold, remask_threshold
-
 def find_results_json(folder):
     # 查找以results开头的json文件
     files = glob.glob(os.path.join(folder, "results*.json"))
     return files[0] if files else None
 
 def find_afcpt_json(folder):
-    files = glob.glob(os.path.join(folder, "*afcpt.json"))
+    files = glob.glob(os.path.join(folder, "afcpt.json"))
     return files[0] if files else None
 
 def extract_from_results_json(path):
@@ -174,21 +152,125 @@ def extract_summary(root="hierarchy_decoding", output="summary.csv", model="__ro
 
 
 def main():
-    args = parse_args()
-    model = args.model if args.model is not None else "__root__GSAI-ML__LLaDA-8B-Instruct"
-    if args.type == 'process':
-        process_results(args.res_dir)
-    elif args.type == 'summary':
-        extract_summary(args.res_dir, model=model)
-    elif args.type == 'process_and_summary':
-        process_results(args.res_dir)
-        extract_summary(args.res_dir, model=model)
+
+  os.environ["HF_ALLOW_CODE_EVAL"] = "1"
+  os.environ["HF_DATASETS_TRUST_REMOTE_CODE"] = "True"
+  os.environ["HF_DATASETS_OFFLINE"] = "1"
+  os.environ["HF_EVALUATE_OFFLINE"] = "1"
+
+  parser = argparse.ArgumentParser()
+
+  parser.add_argument('-y', '--yaml', dest = 'yaml', type=str, required = True)
+  args = parser.parse_args()
+
+  yaml_path = YAML_DIR / args.yaml
+  with yaml_path.open("r", encoding='utf-8') as f:
+    cfgs = yaml.safe_load(f)
+  
+  path_list = []
+  task_list = []
+  for cfg in cfgs:
+    task = cfg.get('task', None)
+    decoding = cfg.get('decoding', None)
+    length = cfg.get('length', 256)
+    block_length = cfg.get('block_length', 32)
+    steps = cfg.get ('steps', 128)
+    model_path = cfg.get('model_path', None)
+    output_dir = cfg.get('output_dir', '/mnt/dllm/dulun.dl/dllm/evaluation_res/')
+    num_fewshot = cfg.get('num_fewshot', 5)
+    summary_output = cfg.get('summary_output', 'summary.csv')
+
+    if not all ([task, decoding, model_path]):
+      raise TypeError(r"Missing required arguments: 'task', 'decoding', or 'model_path'")
+
+    if  "LLaDA-1.5" in model_path:
+      model = "LLaDA-1.5"
+    elif "LLaDA-8B-Instruct" in model_path:
+      model = "LLaDA-8B-Instruct"
+    elif "LLaDA-8B-Base" in model_path:
+      model="LLaDA-8B-Base"
     else:
-        raise ValueError('unimplemented type')
+      model="LLaDA-unknown-version"
 
-if __name__ == '__main__':
-    main()
-    # process_results('/mnt/dllm/dulun.dl/dllm_decoding/evals_results/h20/hierarchy_decoding/remask/mbpp')
-    # extract_summary('/mnt/dllm/dulun.dl/dllm_decoding/evals_results/h20/hierarchy_decoding/')
+    now = datetime.now()
+    ts = now.strftime('%Y-%m-%d_%H:%M:%S')
+    output_path = Path(output_dir) / task / model / f'genlen{length}' / f'blk{block_length}' / decoding / ts
+
+    ignore_keys = {'task', 'decoding', 'model_path', 'length', 'block_length', 'steps', 'output_dir', 'num_fewshot'}
+    additional_params = ",".join([f"{k}={v}" for k, v in cfg.items() if k not in ignore_keys])
     
+    if task == "humaneval":
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \\
+        --output_path {output_path} --log_samples"""
+    elif task == "gsm8k":
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
+        --output_path {output_path} --log_samples"""
+    elif task == "minerva_math":
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
+        --output_path {output_path} --log_samples"""
+    elif task == "mbpp":
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \\
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
+        --output_path {output_path} --log_samples"""
+    elif task == "bbh":
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
+        --output_path {output_path} --log_samples"""
+    else:
+      #raise TypeError(r"Unsupported task: 'task'")
+      continue
+    
+    print (ext_cmd)
 
+    subprocess.run(ext_cmd, shell = True, check = True)
+    # task_list.append(task)
+    # path_list.append(output_path)
+
+    process_results(output_path)
+
+    rows = []
+    instruct_dir = os.path.join(output_path, model_path.replace("/", "__"))
+    results_json = find_results_json(instruct_dir)
+    afcpt_json = find_afcpt_json(output_path)
+
+    exact_match_flex = extract_from_results_json(results_json) if results_json else None
+    avg_calls, tps, tps_our = (extract_from_afcpt_json(afcpt_json) if afcpt_json else (None, None, None))
+
+    rows.append({
+        "task": task,
+        "length": length,
+        "block_length": block_length,
+        "steps": steps,
+        "model": model,
+        "decoding": decoding,
+        "num fewshot": num_fewshot, 
+        "additional_params": additional_params,
+        "score": exact_match_flex,
+        "average forward calls per token": avg_calls,
+        "tokens per second": tps,
+        "tokens per second our": tps_our,
+    })
+
+    write_header = not os.path.exists(summary_output) or os.path.getsize(summary_output) == 0
+
+    with open(summary_output, "a", newline="") as csvfile:
+        fieldnames = ["task","length","block_length","steps","model","decoding","num fewshot",
+                      "additional_params","score","average forward calls per token","tokens per second",
+                      "tokens per second our"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+  
+
+if __name__ == "__main__":
+  main()

@@ -10,4 +10,5 @@ dream/evals_results/
 summary.csv
 confidential.yaml
 PythonJob*.wf
+*summary.csv
 
