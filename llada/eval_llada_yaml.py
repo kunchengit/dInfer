@@ -123,8 +123,7 @@ def main():
   with yaml_path.open("r", encoding='utf-8') as f:
     cfgs = yaml.safe_load(f)
   
-  path_list = []
-  task_list = []
+  
   for cfg in cfgs:
     task = cfg.get('task', None)
     decoding = cfg.get('decoding', None)
@@ -219,12 +218,13 @@ def main():
         "average forward calls per token": avg_calls,
         "tokens per second": tps,
         "tokens per second our": tps_our,
+        "eval timestamp": ts
     })
 
     write_header = not os.path.exists(summary_output) or os.path.getsize(summary_output) == 0
 
     with open(summary_output, "a", newline="") as csvfile:
-        fieldnames = ["task","length","block_length","steps","model","decoding","num fewshot",
+        fieldnames = ["task","length","block_length","steps","eval timestamp","model","decoding","num fewshot",
                       "additional_params","score","average forward calls per token","tokens per second",
                       "tokens per second our"]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
