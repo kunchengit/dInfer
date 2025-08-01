@@ -158,7 +158,7 @@ class LLaDAEvalHarness(LM):
         self.show_speed = show_speed
 
         self.decoding = decoding
-        self.generate_func = decoding_mapping("decoding")
+        self.generate_func = decoding_mapping(decoding) 
         self.kwargs = kwargs
     @property
     def rank(self):

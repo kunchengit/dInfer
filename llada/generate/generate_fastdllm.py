@@ -88,6 +88,8 @@ def generate_fastdllm (model, prompt, steps=128, gen_length=128, block_length=12
     else:
         generated_answer, nfe = generate(model, prompt, steps, gen_length, block_length, temperature, remasking, mask_id, threshold, factor)
 
+    return generated_answer, nfe
+
 
 @ torch.no_grad()
 def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,

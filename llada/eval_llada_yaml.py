@@ -200,27 +200,27 @@ def main():
     additional_params = ",".join([f"{k}={v}" for k, v in cfg.items() if k not in ignore_keys])
     
     if task == "humaneval":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \\
         --output_path {output_path} --log_samples"""
     elif task == "gsm8k":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot}\
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
         --output_path {output_path} --log_samples"""
     elif task == "minerva_math":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot}\
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
         --output_path {output_path} --log_samples"""
     elif task == "mbpp":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot}\
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \\
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
         --output_path {output_path} --log_samples"""
     elif task == "bbh":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot}\
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
         --output_path {output_path} --log_samples"""
@@ -228,7 +228,9 @@ def main():
       #raise TypeError(r"Unsupported task: 'task'")
       continue
     
-    subprocess.run([ext_cmd], check = True)
+    print (ext_cmd)
+
+    subprocess.run(ext_cmd, shell = True, check = True)
     # task_list.append(task)
     # path_list.append(output_path)
 
