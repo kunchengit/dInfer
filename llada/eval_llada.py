@@ -1,7 +1,7 @@
 # Copyright 2025 NVIDIA CORPORATION & AFFILIATES
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
+# you may not use this file except in compliance with the License. 
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
@@ -93,6 +93,7 @@ class LLaDAEvalHarness(LM):
         save_dir=None,
         show_speed=False,
         decoding = "fastdllm",
+        log_generated_items = False,
         **kwargs,
     ):
         '''
@@ -158,7 +159,8 @@ class LLaDAEvalHarness(LM):
         self.show_speed = show_speed
 
         self.decoding = decoding
-        self.generate_func = decoding_mapping(decoding) 
+        self.log_generated_items = log_generated_items
+        self.generate_func = decoding_mapping(decoding)
         self.kwargs = kwargs
     @property
     def rank(self):
@@ -362,11 +364,11 @@ class LLaDAEvalHarness(LM):
             if self.show_speed:
                 one_time = time.time() - start_time
                 total_time += one_time
-                # forward_calls += num_nfe
-                # out_to_file.append({'answer':generated_answer,'number_of_forward_call': self.model._forward_call_count})
-                out_to_file = {'answer':generated_answer,'number_of_forward_call': nfe, 'token per second':self.gen_length / one_time}
-                if self.save_dir is not None:
-                # 增量保存新生成的答案
+
+                if self.save_dir is not None and self.log_generated_items:
+                    print()
+                    out_to_file = {'answer':generated_answer,'number_of_forward_call': nfe, 'token per second':self.gen_length / one_time}
+                    # 增量保存新生成的答案
                     with open(save_path, 'a', encoding='utf-8') as f:
                         f.write(json.dumps(out_to_file, ensure_ascii=False) + '\n')
             if self.accelerator is not None:

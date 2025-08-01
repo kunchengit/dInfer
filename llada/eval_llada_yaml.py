@@ -135,7 +135,9 @@ def main():
     output_dir = cfg.get('output_dir', '/mnt/dllm/dulun.dl/dllm/evaluation_res/')
     num_fewshot = cfg.get('num_fewshot', 5)
     summary_output = cfg.get('summary_output', 'summary.csv')
-
+    show_speed = cfg.get('show_speed', False)
+    log_generated_items = cfg.get('log_generated_items', False)
+    
     if not all ([task, decoding, model_path]):
       raise TypeError(r"Missing required arguments: 'task', 'decoding', or 'model_path'")
 
@@ -152,37 +154,37 @@ def main():
     ts = now.strftime('%Y-%m-%d_%H:%M:%S')
     output_path = Path(output_dir) / task / model / f'genlen{length}' / f'blk{block_length}' / decoding / ts
 
-    ignore_keys = {'task', 'decoding', 'model_path', 'length', 'block_length', 'steps', 'output_dir', 'num_fewshot'}
+    ignore_keys = {'task', 'decoding', 'model_path', 'length', 'block_length', 'steps', 'output_dir', 'num_fewshot', 'show_speed', 'log_generated_items', 'summary_output'}
     additional_params = ",".join([f"{k}={v}" for k, v in cfg.items() if k not in ignore_keys])
     
     if task == "humaneval":
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} \\
         --confirm_run_unsafe_code --model llada_dist \\
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \\
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \\
         --output_path {output_path} --log_samples"""
     elif task == "gsm8k":
       num_fewshot = cfg.get('num_fewshot', 5)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path} --log_samples"""
     elif task == "minerva_math":
       num_fewshot = cfg.get('num_fewshot', 4)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path} --log_samples"""
     elif task == "mbpp":
       num_fewshot = cfg.get('num_fewshot', 3)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path} --log_samples"""
     elif task == "bbh":
       num_fewshot = cfg.get('num_fewshot', 3)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path} --log_samples"""
     else:
       #raise TypeError(r"Unsupported task: 'task'")

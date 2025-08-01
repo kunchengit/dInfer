@@ -41,7 +41,7 @@
 - `factor` : {flaot (0 - 1), None} (default: None)
 - `dual_cache`: boolean (default: False)
 
-## Hierachy Decoding
+## Hierarchy Decoding
 ### hierarchy_fast
 - `decoding`: 'hierarchy_fast_v2'
 - `threshold`: {float (0 - 1) | None} (default: None)
@@ -51,3 +51,11 @@
 - `decoding`: 'hierarchy_remasking'
 - `threshold`: {float (0 - 1) | None} (default: None)
 - `low_threshold`: {float (0 - threshold) | None} (default: None)
+- `remask_threshold`: 
+
+## Other Parameters
+- `show_speed`: boolean (default: False)
+- `log_generated_items`: boolean (default: False)
+- `summary_output`: String (default: 'summary.csv')
+- `output_dir`: String
+- `model_path`: String
