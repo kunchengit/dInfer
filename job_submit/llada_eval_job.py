@@ -6,7 +6,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 
 
-def submit_single_job(script_file, mount_command, **kwargs):
+def submit_single_job(script_file, yaml_file, mount_command, **kwargs):
     """
     提交单个模型的评测任务
     """
@@ -35,17 +35,21 @@ def submit_single_job(script_file, mount_command, **kwargs):
 
     workdir = r"/workspace/bin/Fast-dllm"
     script_dir = os.path.join (workdir, "scripts")
-    base_user_command = (
+    llada_dir = os.path.join (workdir, "llada")
+
+    base_user_command = [
       r"mkdir /mnt/dllm && ",
       f"{mount_command} && ",
       r"cp /mnt/dllm/dulun.dl/dllm_decoding/huggingface.zip ~/.cache && ",
       r"cd ~/.cache && ",
       r"unzip huggingface.zip && ",
-      r"rm -rf huggingface.zip && ",
-      f"cd {script_dir} && ",
-      f"bash {script_file}"
-    )
+      r"rm -rf huggingface.zip && " 
+    ]
 
+    if yaml_file is None:
+      base_user_command.extend([f"cd {script_dir} && ", f"bash {script_file}"])
+    else:
+      base_user_command.extend([f"cd {llada_dir} && ", f"python eval_llada_yaml -y {yaml_file}"])
     # current dir: /workspace/bin
     full_user_command = "".join(base_user_command)
 
@@ -82,7 +86,12 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser()
 
   parser.add_argument('--script', type=str, help='Which script you want to run?')
-  parser.add_argument('--mount', type=str, help='mount dllm command')
+  parser.add_argument('--yaml', type=str, help='Which yaml you want to use?')
+  parser.add_argument('--mount', type=str, required = True, help='mount dllm command')
 
   args = parser.parse_args()
-  submit_single_job (args.script, args.mount)
+
+  if not ((args.script is None) ^ (args.yaml is None)):
+    raise TypeError ("Please provide script or yaml parameters")
+  
+  submit_single_job (args.script, args.yaml, args.mount)
