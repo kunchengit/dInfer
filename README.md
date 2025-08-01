@@ -24,12 +24,12 @@
 - A usage case for yaml mode:
 	```bash
 		cd {Fastdllm repo path}/job_submit
-		python llada_eval_job.py --yaml fastdll_humaneval.yaml
+		python llada_eval_job.py --yaml fastdll_humaneval.yaml --mount {mount_cmd}
 	```
 - A usage case for script mode:
 	```bash
 		cd {Fastdllm repo path}/job_submit
-		python llada_eval_job.py --script eval_humaneval.py
+		python llada_eval_job.py --script eval_humaneval.sh --mount {mount_cmd}
 	```
 
 # Decoding Parameters
