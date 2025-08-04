@@ -54,7 +54,7 @@ def process_results(root_dir: str):
                     humaneval_result = eval_code(file_path)
                     results["results"]["humaneval"]["post_process_pass@1"] = humaneval_result
                     with open(results_file, 'w', encoding='utf-8') as rfile:
-                        rfile.write(json.dumps(results, ensure_ascii=False))
+                        rfile.write(json.dumps(results, ensure_ascii=False, indent=4))
         if afcpt != 0:
             with open(afcpt_file, 'w', encoding='utf-8') as f:
                 data = {'average forward calls per token': afcpt / rank_num}
@@ -85,7 +85,7 @@ def extract_from_results_json(path):
         if 'gsm8k' in data["results"]:
             val = data["results"]["gsm8k"]["exact_match,flexible-extract"]
         elif 'humaneval' in data["results"]:
-            val = data["results"]["humaneval"]["post_process_pass@1"]
+            val = data["results"]["humaneval"]["post_process_pass@1"] if "post_process_pass@1" in  data["results"]["humaneval"] else  data["results"]["humaneval"]["pass@1,create_test"] 
         elif 'minerva_math' in data["results"]:
             val = data["results"]["minerva_math"]["math_verify,none"]
         elif 'mbpp' in data["results"]:
@@ -106,50 +106,6 @@ def extract_from_afcpt_json(path):
     tps_our = data.get("tokens per second our")
     return avg_calls, tps, tps_our
 
-def extract_summary(root="hierarchy_decoding", output="summary.csv", model="__root__GSAI-ML__LLaDA-8B-Instruct"):
-    rows = []
-    for type_dir in glob.glob(os.path.join(root, "*")):
-        if not os.path.isdir(type_dir): continue
-        for task_dir in glob.glob(os.path.join(type_dir, "*")):
-            for param_dir in glob.glob(os.path.join(task_dir, "*")):
-                instruct_dir = os.path.join(param_dir, model)
-                if not os.path.isdir(instruct_dir): continue
-                
-                type_, task, length, block_length, threshold, low_threshold, remask_threshold = parse_dir_name(param_dir)
-                
-                results_json = find_results_json(instruct_dir)
-                afcpt_json = find_afcpt_json(param_dir)
-
-                exact_match_flex = extract_from_results_json(results_json) if results_json else None
-                avg_calls, tps, tps_our = (extract_from_afcpt_json(afcpt_json) if afcpt_json else (None, None, None))
-
-                rows.append({
-                    "type": type_,
-                    "task": task,
-                    "length": length,
-                    "block_length": block_length,
-                    "threshold": threshold,
-                    "low_threshold": low_threshold,
-                    "remask_threshold": remask_threshold,
-                    "exact_match,flexible-extract": exact_match_flex,
-                    "average forward calls per token": avg_calls,
-                    "tokens per second": tps,
-                    "tokens per second our": tps_our,
-                })
-
-    # 写入CSV
-    with open(output, "w", newline="") as csvfile:
-        fieldnames = [
-            "type", "task", "length", "block_length", "threshold", "low_threshold", "remask_threshold",
-            "exact_match,flexible-extract",
-            "average forward calls per token", "tokens per second", "tokens per second our"
-        ]
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-    print(f"Summary saved to {output}")
-
 
 def main():
 
@@ -167,8 +123,7 @@ def main():
   with yaml_path.open("r", encoding='utf-8') as f:
     cfgs = yaml.safe_load(f)
   
-  path_list = []
-  task_list = []
+  
   for cfg in cfgs:
     task = cfg.get('task', None)
     decoding = cfg.get('decoding', None)
@@ -179,7 +134,9 @@ def main():
     output_dir = cfg.get('output_dir', '/mnt/dllm/dulun.dl/dllm/evaluation_res/')
     num_fewshot = cfg.get('num_fewshot', 5)
     summary_output = cfg.get('summary_output', 'summary.csv')
-
+    show_speed = cfg.get('show_speed', False)
+    log_generated_items = cfg.get('log_generated_items', False)
+    
     if not all ([task, decoding, model_path]):
       raise TypeError(r"Missing required arguments: 'task', 'decoding', or 'model_path'")
 
@@ -196,34 +153,38 @@ def main():
     ts = now.strftime('%Y-%m-%d_%H:%M:%S')
     output_path = Path(output_dir) / task / model / f'genlen{length}' / f'blk{block_length}' / decoding / ts
 
-    ignore_keys = {'task', 'decoding', 'model_path', 'length', 'block_length', 'steps', 'output_dir', 'num_fewshot'}
+    ignore_keys = {'task', 'decoding', 'model_path', 'length', 'block_length', 'steps', 'output_dir', 'num_fewshot', 'show_speed', 'log_generated_items', 'summary_output'}
     additional_params = ",".join([f"{k}={v}" for k, v in cfg.items() if k not in ignore_keys])
     
     if task == "humaneval":
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} \\
         --confirm_run_unsafe_code --model llada_dist \\
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \\
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \\
         --output_path {output_path} --log_samples"""
     elif task == "gsm8k":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
+      num_fewshot = cfg.get('num_fewshot', 5)
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
-        --output_path {output_path} --log_samples"""
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path}"""
     elif task == "minerva_math":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
+      num_fewshot = cfg.get('num_fewshot', 4)
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
-        --output_path {output_path} --log_samples"""
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path}"""
     elif task == "mbpp":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \\
+      num_fewshot = cfg.get('num_fewshot', 3)
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
-        --output_path {output_path} --log_samples"""
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path}"""
     elif task == "bbh":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} num_fewshot {num_fewshot} \
+      num_fewshot = cfg.get('num_fewshot', 3)
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},{additional_params} \
-        --output_path {output_path} --log_samples"""
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path}"""
     else:
       #raise TypeError(r"Unsupported task: 'task'")
       continue
@@ -257,12 +218,13 @@ def main():
         "average forward calls per token": avg_calls,
         "tokens per second": tps,
         "tokens per second our": tps_our,
+        "eval timestamp": ts
     })
 
     write_header = not os.path.exists(summary_output) or os.path.getsize(summary_output) == 0
 
     with open(summary_output, "a", newline="") as csvfile:
-        fieldnames = ["task","length","block_length","steps","model","decoding","num fewshot",
+        fieldnames = ["task","length","block_length","steps","eval timestamp","model","decoding","num fewshot",
                       "additional_params","score","average forward calls per token","tokens per second",
                       "tokens per second our"]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
