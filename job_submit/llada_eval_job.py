@@ -49,7 +49,7 @@ def submit_single_job(script_file, yaml_file, mount_command, **kwargs):
     if yaml_file is None:
       base_user_command.extend([f"cd {script_dir} && ", f"bash {script_file}"])
     else:
-      base_user_command.extend([f"cd {llada_dir} && ", f"python eval_llada_yaml -y {yaml_file}"])
+      base_user_command.extend([f"cd {llada_dir} && ", f"python eval_llada_yaml.py -y {yaml_file}"])
     # current dir: /workspace/bin
     full_user_command = "".join(base_user_command)
 
