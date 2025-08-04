@@ -47,9 +47,9 @@ from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
 
 
-from generate.generate_hierarchy import generate_hierarchy
-from generate.generate_cache import generate_with_prefixcache_update
-from generate.generate_fastdllm import generate_fastdllm
+from decoding.generate_hierarchy import generate_hierarchy
+from decoding.generate_cache import generate_with_prefixcache_update
+from decoding.generate_fastdllm import generate_fastdllm
 #from model.modeling_llada import LLaDAModelLM
 from model.modeling_llada_origin import LLaDAModelLM
 
