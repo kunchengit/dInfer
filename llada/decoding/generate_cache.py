@@ -64,10 +64,7 @@ def generate_with_prefixcache_update(model, prompt, steps=128, gen_length=128, b
         while (x[:, current_block_start:current_block_end] == mask_id).sum()>0:
             nfe += 1
             if log_flops:
-                if cfg_scale > 0.:
-                    cfg_factor = 2
-                else:
-                    cfg_factor = 1
+                cfg_factor = 1
                 actual_shape = x[:, current_block_start:].shape
                 op_num = cfg_factor * (32*(4*actual_shape[0]*4096*4096*actual_shape[1]*2 + actual_shape[0]*actual_shape[1]*actual_shape[1]*4096*2+
                         3*actual_shape[0]*4096*12288*actual_shape[1]*2) + actual_shape[0]*4096*126464*actual_shape[1]*2)/ 1e12 
@@ -77,49 +74,24 @@ def generate_with_prefixcache_update(model, prompt, steps=128, gen_length=128, b
             mask_index = (x[:, current_block_start:] == mask_id)
             mask_index[:, current_block_end:] = False
 
-            if cfg_scale > 0.:
-                un_x = x.clone()
-                un_x[prompt_index] = mask_id
-                x_ = torch.cat([x, un_x], dim=0)
-                if cache_update_iter is not None and i%cache_update_iter == 0:
-                    # re-calculate kvcache
-                    output = model(x_, use_cache=True)
-                    logits = output.logits
-                    past_key_values = output.past_key_values
+            if cache_update_iter is not None and i%cache_update_iter == 0:
+                cache_update_step.append(nfe)
 
-                    # update kvcache
-                    new_past_key_values = []
-                    for k in range(len(past_key_values)):
-                        new_past_key_values.append(())
-                        for l in range(len(past_key_values[k])):
-                            new_past_key_values[k] += (past_key_values[k][l][:, :, :prompt.shape[1] + num_block * block_length],)
-                    past_key_values = new_past_key_values
+                # re-calculate kvcache
+                output = model(x, use_cache=True)
+                logits = output.logits[:,current_block_start:]
+                past_key_values = output.past_key_values
 
-                else:
-                    # use kvcache directly
-                    logits = model(x_[:, current_block_start:], past_key_values=past_key_values, use_cache=True).logits
+                # update kvcache
+                new_past_key_values = []
+                for k in range(len(past_key_values)):
+                    new_past_key_values.append(())
+                    for l in range(len(past_key_values[k])):
+                        new_past_key_values[k] += (past_key_values[k][l][:, :, :prompt.shape[1] + num_block * block_length],)
+                past_key_values = new_past_key_values
 
-                logits, un_logits = torch.chunk(logits, 2, dim=0)
-                logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
             else:
-                if cache_update_iter is not None and i%cache_update_iter == 0:
-                    cache_update_step.append(nfe)
-
-                    # re-calculate kvcache
-                    output = model(x, use_cache=True)
-                    logits = output.logits[:,current_block_start:]
-                    past_key_values = output.past_key_values
-
-                    # update kvcache
-                    new_past_key_values = []
-                    for k in range(len(past_key_values)):
-                        new_past_key_values.append(())
-                        for l in range(len(past_key_values[k])):
-                            new_past_key_values[k] += (past_key_values[k][l][:, :, :prompt.shape[1] + num_block * block_length],)
-                    past_key_values = new_past_key_values
-
-                else:
-                    logits = model(x[:, current_block_start:], past_key_values=past_key_values, use_cache=True).logits
+                logits = model(x[:, current_block_start:], past_key_values=past_key_values, use_cache=True).logits
 
             x0, transfer_index = get_transfer_index_cache(logits, mask_index, x[:,current_block_start:], block_length, num_transfer_tokens[:, i], temperature, remasking,
                                                     threshold=threshold, minimal_topk=minimal_topk)

@@ -4,6 +4,11 @@ from pypai.job import PythonJobBuilder
 import os
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+
+CURRENT_DIR = Path(__file__).resolve().parent
+YAML_DIR = CURRENT_DIR.parent / 'yamls'
 
 
 def submit_single_job(script_file, yaml_file, mount_command, **kwargs):
@@ -34,8 +39,11 @@ def submit_single_job(script_file, yaml_file, mount_command, **kwargs):
       memory = 102400 * gpu_num # 100GB per GPU
 
     workdir = r"/workspace/bin/Fast-dllm"
+    homedir = r"/workspace/bin"
     script_dir = os.path.join (workdir, "scripts")
     llada_dir = os.path.join (workdir, "llada")
+    yaml_dir = os.path.join (workdir, "yamls")
+    local_yaml_dir = str(YAML_DIR)
 
     base_user_command = [
       r"mkdir /mnt/dllm && ",
@@ -49,14 +57,16 @@ def submit_single_job(script_file, yaml_file, mount_command, **kwargs):
     if yaml_file is None:
       base_user_command.extend([f"cd {script_dir} && ", f"bash {script_file}"])
     else:
-      base_user_command.extend([f"cd {llada_dir} && ", f"python eval_llada_yaml -y {yaml_file}"])
+      base_user_command.extend([
+        f"mv -f {homedir}/*.yaml {yaml_dir}/ && ",
+        f"cd {llada_dir} && ", 
+        f"python eval_llada_yaml.py -y {yaml_file}"])
     # current dir: /workspace/bin
     full_user_command = "".join(base_user_command)
 
-
     job = PythonJobBuilder(
         code_repo_configs=[repo_conf],
-        source_root="",
+        source_root=local_yaml_dir,
         main_file="",
         km_conf=KMConf(image=image),
         command=full_user_command,
