@@ -5,8 +5,10 @@ import numpy as np
 import torch.nn.functional as F
 import os
 from transformers import AutoTokenizer, AutoModel
-from model.modeling_llada import LLaDAModelLM
+from model.modeling_llada_origin import LLaDAModelLM
 import time
+
+from utils import add_gumbel_noise, 
 
 def add_gumbel_noise(logits, temperature):
     '''
