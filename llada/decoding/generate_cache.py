@@ -8,8 +8,8 @@ from transformers import AutoTokenizer, AutoModel
 from model.modeling_llada_origin import LLaDAModelLM
 import time
 
-from parellel_strategy import get_transfer_index_cache
-from utils import get_num_transfer_tokens
+from .parellel_strategy import get_transfer_index_cache
+from .utils import get_num_transfer_tokens
 
 
 

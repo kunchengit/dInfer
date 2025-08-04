@@ -8,8 +8,8 @@ from transformers import AutoTokenizer, AutoModel
 
 from model.modeling_llada_origin import LLaDAModelLM
 
-from parellel_strategy import get_transfer_index_hierarchy_remask, get_transfer_index_threshold, get_transfer_index_hierarchy_fast_v2
-from utils import add_gumbel_noise, get_num_transfer_tokens
+from .parellel_strategy import get_transfer_index_hierarchy_remask, get_transfer_index_threshold, get_transfer_index_hierarchy_fast_v2
+from .utils import add_gumbel_noise, get_num_transfer_tokens
 
 
 @ torch.no_grad()

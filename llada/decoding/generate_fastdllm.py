@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import os
 from transformers import AutoTokenizer, AutoModel
 from model.modeling_llada_origin import LLaDAModelLM
-from utils import get_num_transfer_tokens, add_gumbel_noise
+from .utils import get_num_transfer_tokens, add_gumbel_noise
 
 
 def generate_fastdllm (model, prompt, steps=128, gen_length=128, block_length=128, temperature=0., mask_id=126336, decoding="fastdllm", **kwargs):
