@@ -111,7 +111,7 @@ def get_default_fewshot_num(task):
   	"humaneval": 0,
     "gsm8k": 5,
     "minerva_math": 4,
-    "mbpp": 4,
+    "mbpp": 3,
     "bbh": 3
   }
   return fewshot_dict.get(task, None)
