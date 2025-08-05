@@ -107,13 +107,13 @@ def extract_from_afcpt_json(path):
     return avg_calls, tps, tps_our
 
 def get_default_fewshot_num(task):
-  fewshot_dict = [
+  fewshot_dict = {
   	"humaneval": 0,
     "gsm8k": 5,
     "minerva_math": 4,
     "mbpp": 4,
     "bbh": 3
-  ]
+  }
   return fewshot_dict.get(task, None)
 
 def main():
