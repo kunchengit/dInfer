@@ -53,6 +53,10 @@
 - `low_threshold`: {float (0 - threshold) | None} (default: None)
 - `remask_threshold`: 
 
+## Cache
+- `cache_type`: ["prefix","dual","prompt"]
+- `strategy`: "fix_iter"
+
 ## Other Parameters
 - `length`: int (default: 256)
 - `block_length`: int (default: 32)

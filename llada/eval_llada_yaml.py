@@ -106,6 +106,15 @@ def extract_from_afcpt_json(path):
     tps_our = data.get("tokens per second our")
     return avg_calls, tps, tps_our
 
+def get_default_fewshot_num(task):
+  fewshot_dict = {
+  	"humaneval": 0,
+    "gsm8k": 5,
+    "minerva_math": 4,
+    "mbpp": 3,
+    "bbh": 3
+  }
+  return fewshot_dict.get(task, None)
 
 def main():
 
@@ -127,18 +136,20 @@ def main():
   for cfg in cfgs:
     task = cfg.get('task', None)
     decoding = cfg.get('decoding', None)
+    model_path = cfg.get('model_path', None)
+    if not all ([task, decoding, model_path]):
+      raise TypeError(r"Missing required arguments: 'task', 'decoding', or 'model_path'")
+    
     length = cfg.get('length', 256)
     block_length = cfg.get('block_length', 32)
     steps = cfg.get ('steps', 128)
-    model_path = cfg.get('model_path', None)
     output_dir = cfg.get('output_dir', '/mnt/dllm/dulun.dl/dllm/evaluation_res/')
-    num_fewshot = cfg.get('num_fewshot', 5)
+    num_fewshot = cfg.get('num_fewshot', get_default_fewshot_num(task))
     summary_output = cfg.get('summary_output', 'summary.csv')
     show_speed = cfg.get('show_speed', False)
     log_generated_items = cfg.get('log_generated_items', False)
     
-    if not all ([task, decoding, model_path]):
-      raise TypeError(r"Missing required arguments: 'task', 'decoding', or 'model_path'")
+    
 
     if  "LLaDA-1.5" in model_path:
       model = "LLaDA-1.5"
@@ -162,25 +173,21 @@ def main():
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \\
         --output_path {output_path} --log_samples"""
     elif task == "gsm8k":
-      num_fewshot = cfg.get('num_fewshot', 5)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path}"""
     elif task == "minerva_math":
-      num_fewshot = cfg.get('num_fewshot', 4)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path}"""
     elif task == "mbpp":
-      num_fewshot = cfg.get('num_fewshot', 3)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path}"""
     elif task == "bbh":
-      num_fewshot = cfg.get('num_fewshot', 3)
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
@@ -222,7 +229,8 @@ def main():
     })
 
     write_header = not os.path.exists(summary_output) or os.path.getsize(summary_output) == 0
-
+		
+    os.makedirs(os.path.dirname(summary_output), exist_ok=True)
     with open(summary_output, "a", newline="") as csvfile:
         fieldnames = ["task","length","block_length","steps","eval timestamp","model","decoding","num fewshot",
                       "additional_params","score","average forward calls per token","tokens per second",
