@@ -193,3 +193,71 @@ def get_transfer_index_cache (logits, mask_index, x, block_end, num_transfer_tok
                 if confidence[j, select_index[k]] < threshold:
                     transfer_index[j, select_index[k]] = False
     return x0, transfer_index
+
+
+def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold=None):
+    logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+    x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
+
+    if remasking == 'low_confidence':
+        p = F.softmax(logits, dim=-1)
+        x0_p = torch.squeeze(
+            torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
+    elif remasking == 'random':
+        x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+    else:
+        raise NotImplementedError(remasking)
+    
+    x0 = torch.where(mask_index, x0, x)
+    confidence = torch.where(mask_index, x0_p, -np.inf)
+
+    transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+    if threshold is not None:
+        num_transfer_tokens = mask_index.sum(dim=1, keepdim=True)
+    for j in range(confidence.shape[0]):
+        _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j])
+        transfer_index[j, select_index] = True
+        if threshold is not None:
+            for k in range(1, num_transfer_tokens[j]):
+                if confidence[j, select_index[k]] < threshold:
+                    transfer_index[j, select_index[k]] = False
+    return x0, transfer_index
+
+def get_transfer_index_dynamic(logits, temperature, remasking, mask_index, x, num_transfer_tokens, factor=1):
+    logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+    x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
+    if remasking == 'low_confidence':
+        p = F.softmax(logits, dim=-1)
+        x0_p = torch.squeeze(
+            torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
+    elif remasking == 'random':
+        x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+    else:
+        raise NotImplementedError(remasking)
+    
+    x0 = torch.where(mask_index, x0, x)
+    confidence = torch.where(mask_index, x0_p, -np.inf)
+
+    transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+    num_transfer_tokens = mask_index.sum(dim=1, keepdim=True)
+    
+    for j in range(confidence.shape[0]):
+        ns=list(range(1,num_transfer_tokens[j]+1))
+        es=[factor/(n+1) for n in ns]
+        threshs=[1-e for e in es]
+
+        # at least one token is transferred
+        threshs[0]=-1
+        sorted_confidence=torch.sort(confidence[j][mask_index[j]],dim=-1,descending=True)[0]
+        assert len(sorted_confidence)==len(threshs)
+        for top_i in range(len(threshs)):
+            if sorted_confidence[top_i]<threshs[top_i]:
+                break
+
+        if top_i == 0 or top_i == len(threshs)-1:
+            top_i+=1
+
+        _, select_index = torch.topk(confidence[j], k=top_i)
+        transfer_index[j, select_index] = True
+
+    return x0, transfer_index

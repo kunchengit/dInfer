@@ -53,6 +53,15 @@
 - `low_threshold`: {float (0 - threshold) | None} (default: None)
 - `remask_threshold`: 
 
+## distributed
+- `decoding`: 'distributed'
+- `remasking`: {'low_confidence' | 'random'} (default: 'low_confidence')
+- `use_cache`: boolean (default: False)
+- `threshold`: {float (0 - 1) | None} (default: None)
+- `factor` : {flaot (0 - 1), None} (default: None)
+- `dual_cache`: boolean (default: False)
+- `use_block`: boolean (default: False)
+
 ## Cache
 - `cache_type`: ["prefix","dual","prompt"]
 - `strategy`: "fix_iter"
