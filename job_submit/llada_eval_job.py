@@ -98,10 +98,11 @@ if __name__ == "__main__":
   parser.add_argument('--script', type=str, help='Which script you want to run?')
   parser.add_argument('--yaml', type=str, help='Which yaml you want to use?')
   parser.add_argument('--mount', type=str, required = True, help='mount dllm command')
+  parser.add_argument('--branch', type=str, default='master')
 
   args = parser.parse_args()
 
   if not ((args.script is None) ^ (args.yaml is None)):
     raise TypeError ("Please provide script or yaml parameters")
   
-  submit_single_job (args.script, args.yaml, args.mount)
+  submit_single_job (args.script, args.yaml, args.mount, branch = args.branch)
