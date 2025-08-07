@@ -40,11 +40,11 @@
 - task: gsm8k
   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
   output_dir: '/mnt/dllm/dulun.dl/dllm/tmp_res/'
-  steps: 128
+  steps: 256
   decoding: fastdllm
   length: 256
-  block_length: 32
-  threshold: 0.9
+  block_length: 16
+#  threshold: 0.9
   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/gsm8k_summary_tmp.csv'
   show_speed: True
   log_generated_items: False
