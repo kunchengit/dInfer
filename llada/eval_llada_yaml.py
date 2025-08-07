@@ -125,7 +125,7 @@ def extract_from_results_json(path: str, task_name: TaskName):
         if 'gsm8k' in task_name.task_id:
             val = data["results"][task_name.task_id]["exact_match,flexible-extract"]
         elif 'humaneval' in task_name.task_id:
-            val = data["results"][task_name.task_id]["post_process_pass@1"] if "post_process_pass@1" in  data["results"]["humaneval"] else  data["results"]["humaneval"]["pass@1,create_test"] 
+            val = data["results"][task_name.task_id]["post_process_pass@1"] if "post_process_pass@1" in  data["results"]["humaneval"] else  data["results"][task_name.task_id]["pass@1,create_test"] 
         elif 'minerva_math' in task_name.task_id:
             val = data["results"][task_name.task_id]["math_verify,none"]
         elif 'mbpp' in task_name.task_id:
