@@ -16,7 +16,7 @@ YAML_DIR = CURRENT_DIR.parent / 'yamls'
 TASK_DIR = CURRENT_DIR.parent / 'tasks'
 os.environ['HF_DATASETS_OFFLINE']='1'
 os.environ['HF_EVALUATE_OFFLINE']='1'
-#os.environ["CUDA_VISIBLE_DEVICES"]='0'
+os.environ["CUDA_VISIBLE_DEVICES"]='0'
 
 class ModelName(Enum):
     llada15 = "LLaDA-1.5"
@@ -217,7 +217,7 @@ def main():
         --confirm_run_unsafe_code --model llada_dist \\
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \\
         --output_path {output_path} --log_samples \
-        ----include_path {TASK_DIR}"""
+        --include_path {TASK_DIR}"""
     elif task_name == TaskName.gsm8k_llada15:
         ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot if num_fewshot < 5 else 4} --fewshot_as_multiturn --apply_chat_template \
         --confirm_run_unsafe_code --model llada_dist \
