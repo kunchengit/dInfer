@@ -143,6 +143,7 @@ class LLaDAEvalHarness(LM):
 
         self.mask_id = mask_id
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self.model_path = model_path
 
         self.mc_num = mc_num
         self.batch_size = int(batch_size)
@@ -155,6 +156,7 @@ class LLaDAEvalHarness(LM):
         self.gen_length = gen_length
         self.block_length = block_length
         self.is_instruct = True if 'instruct' in model_path.lower() else False
+        self.is_lattest = True if '1.5' in model_path else False
         self.save_dir = save_dir
         self.show_speed = show_speed
 
@@ -169,6 +171,16 @@ class LLaDAEvalHarness(LM):
     @property
     def world_size(self):
         return self._world_size
+    
+    @property
+    def tokenizer_name(self) -> str:
+        return self.model_path
+    
+    def apply_chat_template(self, chat_history, **kwargs) -> str:
+        if "tokenize" not in kwargs:
+            kwargs["tokenize"] = False
+        return self.tokenizer.apply_chat_template(chat_history, **kwargs)
+
 
     def _forward_process(self, batch, prompt_index):
         b, l = batch.shape
@@ -326,13 +338,24 @@ class LLaDAEvalHarness(LM):
             
             start_time = time.time()
             question = req.args[0]
-            if self.is_instruct:
-                m = [{"role": "user", "content": question}]
-                user_input = self.tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
-                input_ids = self.tokenizer(user_input)['input_ids']
-            else:
-                user_input = question
-                input_ids = self.tokenizer(user_input)['input_ids']
+            #if self.is_instruct:
+            #    m = [{"role": "user", "content": question}]
+            #    user_input = self.tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+            #    input_ids = self.tokenizer(user_input)['input_ids']
+            #elif self.is_lattest:
+            #    print(question, "\n^^^^^^^^^^^^^")
+                
+            #    m = [{"role": "user", "content": f'Complete the following python code:\n{question}'}]
+            #    m = [{"role": "user", "content": question}]
+            #    user_input = self.tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+            #    print (user_input, "\n**********************")
+                
+            #    input()
+            #    exit(0)
+            #    input_ids = self.tokenizer(user_input)['input_ids']
+            
+            user_input = question
+            input_ids = self.tokenizer(user_input)['input_ids']
 
             stop_tokens = req.args[1]['until']
             input_ids = torch.tensor(input_ids).to(self.device).unsqueeze(0)
@@ -340,9 +363,10 @@ class LLaDAEvalHarness(LM):
             generated_answer, nfe = self.generate_func(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
                                         temperature=0, mask_id=self.mask_id, decoding = self.decoding, **self.kwargs)
 
-            if self.is_instruct and 'task_id' in req.doc and str(req.doc['task_id']).lower().startswith('humaneval'):
+            if (self.is_instruct or self.is_lattest) and 'task_id' in req.doc and str(req.doc['task_id']).lower().startswith('humaneval'):
                 if self.show_speed:
-                    num_tokens += (generated_answer != 126081).sum()
+                    num_tokens_step = int((generated_answer != 126081).sum())
+                    num_tokens += num_tokens_step
                     num_tokens_our += self.gen_length
                     num_nfe += nfe
                 generated_answer = self.tokenizer.decode(generated_answer[0][input_ids.shape[1]:], skip_special_tokens=True)
@@ -355,7 +379,8 @@ class LLaDAEvalHarness(LM):
                 # remove special tokens
                 generated_answer_ids = torch.tensor(self.tokenizer(generated_answer)["input_ids"])
                 if self.show_speed:
-                    num_tokens += (generated_answer_ids != 126081).sum()
+                    num_tokens_step = int((generated_answer_ids != 126081).sum())
+                    num_tokens += num_tokens_step
                     num_tokens_our += self.gen_length
                     num_nfe += nfe
                 generated_answer = self.tokenizer.decode(generated_answer_ids, skip_special_tokens=True)
@@ -366,8 +391,7 @@ class LLaDAEvalHarness(LM):
                 total_time += one_time
 
                 if self.save_dir is not None and self.log_generated_items:
-                    print()
-                    out_to_file = {'answer':generated_answer,'number_of_forward_call': nfe, 'token per second':self.gen_length / one_time}
+                    out_to_file = {'answer':generated_answer,'number_of_forward_call': nfe, 'token_num': num_tokens_step, 'tpf': num_tokens_step / nfe, 'token per second': num_tokens_step / one_time}
                     # 增量保存新生成的答案
                     with open(save_path, 'a', encoding='utf-8') as f:
                         f.write(json.dumps(out_to_file, ensure_ascii=False) + '\n')

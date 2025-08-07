@@ -9,11 +9,51 @@ from tqdm import tqdm
 from postprocess_code import eval_code
 import glob
 import csv
+from enum import Enum
 
 CURRENT_DIR = Path(__file__).resolve().parent
 YAML_DIR = CURRENT_DIR.parent / 'yamls'
+TASK_DIR = CURRENT_DIR.parent / 'tasks'
 os.environ['HF_DATASETS_OFFLINE']='1'
 os.environ['HF_EVALUATE_OFFLINE']='1'
+#os.environ["CUDA_VISIBLE_DEVICES"]='0'
+
+class ModelName(Enum):
+    llada15 = "LLaDA-1.5"
+    llada_instruct = "LLaDA-8B-Instruct"
+    llada_base = "LLaDA-8B-Base"
+    llada_unknown = "LLaDA-unknown-version"
+
+class TaskName(Enum):
+    humaneval_llada15 = ("humaneval_llada1.5", ModelName.llada15, 0)
+    humaneval_llada_instruct = ("humaneval", ModelName.llada_instruct, 0)
+    humaneval_llada_base = ("humaneval", ModelName.llada_base, 0)
+    humaneval_llada_unknown = ("humaneval", ModelName.llada_unknown, 0)
+
+    gsm8k_llada15 = ("gsm8k_llada1.5", ModelName.llada15, 4)
+    gsm8k_llada_instruct = ("gsm8k", ModelName.llada_instruct, 5)
+    gsm8k_llada_base = ("gsm8k", ModelName.llada_base, 5)
+    gsm8k_llada_unknown = ("gsm8k", ModelName.llada_unknown, 5)
+
+    minerva_math_llada15 = ("minerva_math", ModelName.llada15, 4)
+    minerva_math_llada_instruct = ("minerva_math", ModelName.llada_instruct, 4)
+    minerva_math_llada_base = ("minerva_math", ModelName.llada_base, 4)
+    minerva_math_llada_unknown = ("minerva_math", ModelName.llada_unknown, 4)
+
+    mbpp_llada15 = ("mbpp", ModelName.llada15, 3)
+    mbpp_llada_instruct = ("mbpp", ModelName.llada_instruct, 3)
+    mbpp_llada_base = ("mbpp", ModelName.llada_base, 3)
+    mbpp_llada_unknown = ("mbpp", ModelName.llada_unknown, 3)
+
+    bbh_llada15 = ("bbh", ModelName.llada15, 3)
+    bbh_llada_instruct = ("bbh", ModelName.llada_instruct, 3)
+    bbh_llada_base = ("bbh", ModelName.llada_base, 3)
+    bbh_llada_unknown = ("bbh", ModelName.llada_unknown, 3)
+
+    def __init__(self, task_id, model, fewshot) -> None:
+       self.task_id = task_id
+       self.model = model
+       self.fewshot = fewshot
 
 
 def process_results(root_dir: str):
@@ -140,34 +180,51 @@ def main():
     if not all ([task, decoding, model_path]):
       raise TypeError(r"Missing required arguments: 'task', 'decoding', or 'model_path'")
     
+    if  ModelName.llada15.value in model_path:
+      model = ModelName.llada15
+    elif ModelName.llada_instruct in model_path:
+      model = ModelName.llada_instruct
+    elif ModelName.llada_base in model_path:
+      model = ModelName.llada_base
+    else:
+      model = ModelName.llada_unknown
+
+    task_name = TaskName[f"{task}_{model.name}"]
+
+
     length = cfg.get('length', 256)
     block_length = cfg.get('block_length', 32)
     steps = cfg.get ('steps', 128)
     output_dir = cfg.get('output_dir', '/mnt/dllm/dulun.dl/dllm/evaluation_res/')
-    num_fewshot = cfg.get('num_fewshot', get_default_fewshot_num(task))
+    num_fewshot = cfg.get('num_fewshot', task_name.fewshot)
     summary_output = cfg.get('summary_output', 'summary.csv')
     show_speed = cfg.get('show_speed', False)
     log_generated_items = cfg.get('log_generated_items', False)
     
     
 
-    if  "LLaDA-1.5" in model_path:
-      model = "LLaDA-1.5"
-    elif "LLaDA-8B-Instruct" in model_path:
-      model = "LLaDA-8B-Instruct"
-    elif "LLaDA-8B-Base" in model_path:
-      model="LLaDA-8B-Base"
-    else:
-      model="LLaDA-unknown-version"
+    
 
     now = datetime.now()
     ts = now.strftime('%Y-%m-%d_%H:%M:%S')
-    output_path = Path(output_dir) / task / model / f'genlen{length}' / f'blk{block_length}' / decoding / ts
+    output_path = Path(output_dir) / task / model.value / f'genlen{length}' / f'blk{block_length}' / decoding / ts
 
     ignore_keys = {'task', 'decoding', 'model_path', 'length', 'block_length', 'steps', 'output_dir', 'num_fewshot', 'show_speed', 'log_generated_items', 'summary_output'}
     additional_params = ",".join([f"{k}={v}" for k, v in cfg.items() if k not in ignore_keys])
     
-    if task == "humaneval":
+    if task_name == TaskName.humaneval_llada15:
+        ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --apply_chat_template \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \\
+        --output_path {output_path} --log_samples \
+        ----include_path {TASK_DIR}"""
+    elif task_name == TaskName.gsm8k_llada15:
+        ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot if num_fewshot < 5 else 4} --fewshot_as_multiturn --apply_chat_template \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path} \
+        --include_path {TASK_DIR}"""
+    elif task == "humaneval":
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} \\
         --confirm_run_unsafe_code --model llada_dist \\
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \\
@@ -176,7 +233,8 @@ def main():
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
-        --output_path {output_path}"""
+        --output_path {output_path} \
+        --include_path {TASK_DIR}"""
     elif task == "minerva_math":
       ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
@@ -217,7 +275,7 @@ def main():
         "length": length,
         "block_length": block_length,
         "steps": steps,
-        "model": model,
+        "model": model.value,
         "decoding": decoding,
         "num fewshot": num_fewshot, 
         "additional_params": additional_params,
