@@ -36,3 +36,21 @@ def get_num_transfer_tokens(mask_index, steps):
         num_transfer_tokens[i, :remainder[i]] += 1
 
     return num_transfer_tokens
+
+def calculate_op_num(x, hidden_size=4096, mlp_hidden_size = 12288, vocab_size = 126464, num_hidden_layers=32, cache_length=0):
+    cfg_factor = 1
+    qkv_ops = 4*x.shape[0]*hidden_size*hidden_size*x.shape[1]*2
+    attn_ops = x.shape[0]*(cache_length)*x.shape[1]*hidden_size*2
+    ffn_ops = 3*x.shape[0]*hidden_size*mlp_hidden_size*x.shape[1]*2
+    layer_ops = qkv_ops + attn_ops + ffn_ops
+    op_num = cfg_factor * (num_hidden_layers*layer_ops + x.shape[0]*hidden_size*vocab_size*x.shape[1]*2)
+    return op_num/1e12 
+
+def calculate_op_num(x, hidden_size=4096, mlp_hidden_size = 12288, vocab_size = 126464, num_hidden_layers=32, cache_length=0):
+    cfg_factor = 1
+    qkv_ops = 4*x.shape[0]*hidden_size*hidden_size*x.shape[1]*2
+    attn_ops = x.shape[0]*(cache_length)*x.shape[1]*hidden_size*2
+    ffn_ops = 3*x.shape[0]*hidden_size*mlp_hidden_size*x.shape[1]*2
+    layer_ops = qkv_ops + attn_ops + ffn_ops
+    op_num = cfg_factor * (num_hidden_layers*layer_ops + x.shape[0]*hidden_size*vocab_size*x.shape[1]*2)
+    return op_num/1e12 

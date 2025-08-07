@@ -288,7 +288,9 @@ def main():
 
     write_header = not os.path.exists(summary_output) or os.path.getsize(summary_output) == 0
 		
-    os.makedirs(os.path.dirname(summary_output), exist_ok=True)
+    summary_dirname = os.path.dirname(summary_output)
+    if summary_dirname is not None and len(summary_dirname) > 0:
+    	os.makedirs(summary_dirname, exist_ok=True)
     with open(summary_output, "a", newline="") as csvfile:
         fieldnames = ["task","length","block_length","steps","eval timestamp","model","decoding","num fewshot",
                       "additional_params","score","average forward calls per token","tokens per second",
