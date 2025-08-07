@@ -1,3 +1,5 @@
+from evaluate.evaluator.text2text_generation import TRANSLATION_TASK_DOCSTRING_EXAMPLE
+from huggingface_hub import hub_mixin
 import yaml
 import os
 import subprocess
@@ -16,7 +18,7 @@ YAML_DIR = CURRENT_DIR.parent / 'yamls'
 TASK_DIR = CURRENT_DIR.parent / 'tasks'
 os.environ['HF_DATASETS_OFFLINE']='1'
 os.environ['HF_EVALUATE_OFFLINE']='1'
-os.environ["CUDA_VISIBLE_DEVICES"]='0'
+#os.environ["CUDA_VISIBLE_DEVICES"]='0'
 
 class ModelName(Enum):
     llada15 = "LLaDA-1.5"
@@ -212,41 +214,65 @@ def main():
     ignore_keys = {'task', 'decoding', 'model_path', 'length', 'block_length', 'steps', 'output_dir', 'num_fewshot', 'show_speed', 'log_generated_items', 'summary_output'}
     additional_params = ",".join([f"{k}={v}" for k, v in cfg.items() if k not in ignore_keys])
     
-    if task_name == TaskName.humaneval_llada15:
+    if task_name in {TaskName.humaneval_llada15, TaskName.humaneval_llada_instruct}:
         ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --apply_chat_template \\
         --confirm_run_unsafe_code --model llada_dist \\
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \\
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path} --log_samples \
         --include_path {TASK_DIR}"""
-    elif task_name == TaskName.gsm8k_llada15:
+    elif task_name in {TaskName.gsm8k_llada15, TaskName.gsm8k_llada_instruct}:
         ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot if num_fewshot < 5 else 4} --fewshot_as_multiturn --apply_chat_template \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path} \
         --include_path {TASK_DIR}"""
-    elif task == "humaneval":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} \\
-        --confirm_run_unsafe_code --model llada_dist \\
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \\
+    elif task_name in {TaskName.humaneval_llada_base, TaskName.humaneval_llada_unknown}:
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path} --log_samples"""
-    elif task == "gsm8k":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
-        --output_path {output_path} \
-        --include_path {TASK_DIR}"""
-    elif task == "minerva_math":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
+    elif task in {TaskName.gsm8k_llada_base, TaskName.gsm8k_llada_unknown}:
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path}"""
-    elif task == "mbpp":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
+    elif task_name in {TaskName.minerva_math_llada15, TaskName.minerva_math_llada_instruct}:
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --apply_chat_template \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path}"""
-    elif task == "bbh":
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task} --num_fewshot {num_fewshot} \
+    elif task_name in {TaskName.minerva_math_llada_base, TaskName.minerva_math_llada_unknown}:
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path}"""
+    elif task_name in {TaskName.minerva_math_llada_instruct, TaskName.minerva_math_llada15}:
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --apply_chat_template \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path}"""
+    elif task_name in {TaskName.minerva_math_llada_unknown, TaskName.minerva_math_llada_base}:
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path}"""
+    elif task_name in {TaskName.mbpp_llada15, TaskName.mbpp_llada_instruct}:
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --apply_chat_template \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path}"""
+    elif task_name in {TaskName.mbpp_llada_base, TaskName.mbpp_llada_unknown}:
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path}"""
+    elif task_name in {TaskName.bbh_llada15, TaskName.bbh_llada_instruct}:
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --apply_chat_template \
+        --confirm_run_unsafe_code --model llada_dist \
+        --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
+        --output_path {output_path}"""
+    elif task_name in {TaskName.bbh_llada_base, TaskName.bbh_llada_unknown}:
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params} \
         --output_path {output_path}"""

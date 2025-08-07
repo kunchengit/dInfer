@@ -6,8 +6,8 @@
   decoding: 'hierarchy_remasking'
   length: 512
   block_length: 32
-  threshold: 0.9
-  low_threshold: 0.45
+  threshold: 0.88
+  low_threshold: 0.48
   remask_threshold: 0.001
   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
   show_speed: True
@@ -19,8 +19,8 @@
   decoding: 'hierarchy_remasking'
   length: 512
   block_length: 32
-  threshold: 0.92
-  low_threshold: 0.45
+  threshold: 0.88
+  low_threshold: 0.42
   remask_threshold: 0.001
   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
   show_speed: True
@@ -89,7 +89,7 @@
   block_length: 32
   threshold: 0.88
   low_threshold: 0.45
-  remask_threshold: 0.001
+  remask_threshold: 0.2
   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
   show_speed: True
   log_generated_items: False
@@ -101,8 +101,8 @@
   length: 512
   block_length: 32
   threshold: 0.88
-  low_threshold: 0.5
-  remask_threshold: 0.001
+  low_threshold: 0.45
+  remask_threshold: 0.3
   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
   show_speed: True
   log_generated_items: False
