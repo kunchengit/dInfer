@@ -56,7 +56,7 @@ class TaskName(Enum):
        self.fewshot = fewshot
 
 
-def process_results(root_dir: str):
+def process_results(root_dir: str, task_name: TaskName):
     for dirpath, dirnames, filenames in tqdm(os.walk(root_dir), desc='merging results...'):
         # if 'Instruct' in dirpath:
         #     continue
@@ -89,10 +89,10 @@ def process_results(root_dir: str):
                 if results_file is not None:
                     with open(results_file, 'r', encoding='utf-8') as rfile:
                         results = json.load(rfile)
-                    if "post_process_pass@1" in results["results"]["humaneval"]:
+                    if "post_process_pass@1" in results["results"][task_name.task_id]:
                         continue
                     humaneval_result = eval_code(file_path)
-                    results["results"]["humaneval"]["post_process_pass@1"] = humaneval_result
+                    results["results"][task_name.task_id]["post_process_pass@1"] = humaneval_result
                     with open(results_file, 'w', encoding='utf-8') as rfile:
                         rfile.write(json.dumps(results, ensure_ascii=False, indent=4))
         if afcpt != 0:
@@ -118,20 +118,20 @@ def find_afcpt_json(folder):
     files = glob.glob(os.path.join(folder, "afcpt.json"))
     return files[0] if files else None
 
-def extract_from_results_json(path):
+def extract_from_results_json(path: str, task_name: TaskName):
     with open(path, "r") as f:
         data = json.load(f)
     try:
-        if 'gsm8k' in data["results"]:
-            val = data["results"]["gsm8k"]["exact_match,flexible-extract"]
-        elif 'humaneval' in data["results"]:
-            val = data["results"]["humaneval"]["post_process_pass@1"] if "post_process_pass@1" in  data["results"]["humaneval"] else  data["results"]["humaneval"]["pass@1,create_test"] 
-        elif 'minerva_math' in data["results"]:
-            val = data["results"]["minerva_math"]["math_verify,none"]
-        elif 'mbpp' in data["results"]:
-            val = data["results"]["mbpp"]["pass_at_1,none"]
-        elif 'bbh' in data["results"]:
-            val = data["results"]["mbpp"]["exact_match,get-answer"]
+        if 'gsm8k' in task_name.task_id:
+            val = data["results"][task_name.task_id]["exact_match,flexible-extract"]
+        elif 'humaneval' in task_name.task_id:
+            val = data["results"][task_name.task_id]["post_process_pass@1"] if "post_process_pass@1" in  data["results"]["humaneval"] else  data["results"][task_name.task_id]["pass@1,create_test"] 
+        elif 'minerva_math' in task_name.task_id:
+            val = data["results"][task_name.task_id]["math_verify,none"]
+        elif 'mbpp' in task_name.task_id:
+            val = data["results"][task_name.task_id]["pass_at_1,none"]
+        elif 'bbh' in task_name.task_id:
+            val = data["results"][task_name.task_id]["exact_match,get-answer"]
         else:
             val = None
     except Exception:
@@ -260,14 +260,14 @@ def main():
     # task_list.append(task)
     # path_list.append(output_path)
 
-    process_results(output_path)
+    process_results(output_path, task_name)
 
     rows = []
     instruct_dir = os.path.join(output_path, model_path.replace("/", "__"))
     results_json = find_results_json(instruct_dir)
     afcpt_json = find_afcpt_json(output_path)
 
-    exact_match_flex = extract_from_results_json(results_json) if results_json else None
+    exact_match_flex = extract_from_results_json(results_json, task_name) if results_json else None
     avg_calls, tps, tps_our = (extract_from_afcpt_json(afcpt_json) if afcpt_json else (None, None, None))
 
     rows.append({
@@ -290,7 +290,7 @@ def main():
 		
     summary_dirname = os.path.dirname(summary_output)
     if summary_dirname is not None and len(summary_dirname) > 0:
-    	os.makedirs(summary_dirname, exist_ok=True)
+        os.makedirs(summary_dirname, exist_ok=True)
     with open(summary_output, "a", newline="") as csvfile:
         fieldnames = ["task","length","block_length","steps","eval timestamp","model","decoding","num fewshot",
                       "additional_params","score","average forward calls per token","tokens per second",
