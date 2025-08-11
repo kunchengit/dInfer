@@ -18,7 +18,7 @@ YAML_DIR = CURRENT_DIR.parent / 'yamls'
 TASK_DIR = CURRENT_DIR.parent / 'tasks'
 os.environ['HF_DATASETS_OFFLINE']='1'
 os.environ['HF_EVALUATE_OFFLINE']='1'
-#os.environ["CUDA_VISIBLE_DEVICES"]='0'
+#os.environ["CUDA_VISIBLE_DEVICES"]='1'
 
 class ModelName(Enum):
     llada15 = "LLaDA-1.5"
