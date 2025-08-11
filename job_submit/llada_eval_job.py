@@ -102,9 +102,11 @@ if __name__ == "__main__":
   parser.add_argument('--branch', type=str, default='master')
   parser.add_argument('--limit', type=int, default=None)
 
+
   args = parser.parse_args()
 
   if not ((args.script is None) ^ (args.yaml is None)):
     raise TypeError ("Please provide script or yaml parameters")
-  
+
   submit_single_job (args.script, args.yaml, args.mount, branch = args.branch, limit = args.limit)
+
