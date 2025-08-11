@@ -1,40 +1,40 @@
 # Fast dllm 
-- task: minerva_math
-  model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
-  output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
-  steps: 128
-  decoding: fastdllm
-  length: 256
-  block_length: 32
-  threshold: 0.9
-  summary_output: 'summary.csv'
-  show_speed: True
-  log_generated_items: False
+# - task: minerva_math
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: fastdllm
+#   length: 256
+#   block_length: 32
+#   threshold: 0.9
+#   summary_output: 'summary.csv'
+#   show_speed: True
+#   log_generated_items: False
 # Fast dllm + cache
 - task: minerva_math
   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
-  output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+  output_dir: '/mnt/dllm/dulun.dl/dllm/tmp_res/'
   steps: 128
   decoding: fastdllm
-  length: 256
-  block_length: 32
+  length: 1024
+  block_length: 128
   threshold: 0.9
   use_cache: True
   dual_cache: False
-  summary_output: 'summary.csv'
+  summary_output:  '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/math_summary_tmp.csv'
   show_speed: True
   log_generated_items: False
 # hierarchy_remasking
-- task: minerva_math
-  model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
-  output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
-  steps: 128
-  decoding: 'hierarchy_remasking'
-  length: 256
-  block_length: 32
-  threshold: 0.9
-  low_threshold: 0.5
-  remask_threshold: 0.35
-  summary_output: 'summary.csv'
-  show_speed: True
-  log_generated_items: False
+# - task: minerva_math
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'hierarchy_remasking'
+#   length: 256
+#   block_length: 32
+#   threshold: 0.9
+#   low_threshold: 0.5
+#   remask_threshold: 0.35
+#   summary_output: 'summary.csv'
+#   show_speed: True
+#   log_generated_items: False

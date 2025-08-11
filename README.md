@@ -31,7 +31,9 @@
 		cd {Fastdllm repo path}/job_submit
 		python llada_eval_job.py --script eval_humaneval.sh --mount {mount_cmd}
 	```
-
+- Optional Parameters:
+  - `--branch` {your branch} (default: Master)
+  
 # Decoding Parameters
 ## Fastdllm
 - `decoding`: 'fastdllm'
