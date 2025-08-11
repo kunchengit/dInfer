@@ -43,24 +43,25 @@ def generate_fastdllm (model, prompt, steps=128, gen_length=128, block_length=12
     remasking = kwargs.get('remasking', 'low_confidence') 
     threshold = kwargs.get('threshold', None)
     factor = kwargs.get('factor', None)
+    early_stop = kwargs.get("early_stop", False)
 
 
     if use_cache:
         if dual_cache:
             generated_answer, nfe = generate_with_dual_cache(model, prompt, steps, gen_length, block_length, temperature, remasking, 
-                mask_id, threshold, factor)
+                mask_id, threshold, factor, early_stop)
         else:
             generated_answer, nfe = generate_with_prefix_cache(model, prompt, steps, gen_length, block_length, temperature, remasking, 
-                mask_id, threshold, factor)
+                mask_id, threshold, factor, early_stop)
     else:
-        generated_answer, nfe = generate(model, prompt, steps, gen_length, block_length, temperature, remasking, mask_id, threshold, factor)
+        generated_answer, nfe = generate(model, prompt, steps, gen_length, block_length, temperature, remasking, mask_id, threshold, factor, early_stop)
 
     return generated_answer, nfe
 
 
 @ torch.no_grad()
 def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-             remasking='low_confidence', mask_id=126336, threshold=None, factor=None):
+             remasking='low_confidence', mask_id=126336, threshold=None, factor=None, early_stop=False):
     '''
     Args:
         model: Mask predictor.
@@ -73,6 +74,8 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
         remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
     '''
+    eos_id = 126081
+
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
 
@@ -98,15 +101,29 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
                 x0, transfer_index = get_transfer_index_dynamic(logits, temperature, remasking, mask_index, x, None, factor)
             x[transfer_index] = x0[transfer_index]
             i += 1
+
+            if early_stop:
+                pos = torch.arange(x.shape[1], device = x.device).unsqueeze(0)
+                eos_mask = (x == eos_id)
+                first_eos = torch.where(eos_mask, pos, x.shape[1]).amin(dim=1)
+                after_first = pos > first_eos.unsqueeze(1)
+
+                x[after_first] = eos_id
+
+
             if (x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (num_block + 1) * block_length] == mask_id).sum() == 0:
                 break
+        
+        if early_stop and  (x[transfer_index] == eos_id).any():
+            return x, nfe
+
     return x, nfe
 
 
 
 @ torch.no_grad()
 def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-             remasking='low_confidence', mask_id=126336, threshold=None, factor=None):
+             remasking='low_confidence', mask_id=126336, threshold=None, factor=None, early_stop = False):
     '''
     Args:
         model: Mask predictor.
@@ -119,6 +136,8 @@ def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_l
         remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
     '''
+    eos_id = 126081
+
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
 
@@ -177,16 +196,25 @@ def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_l
                 x0, transfer_index = get_transfer_index_dynamic(logits, temperature, remasking, mask_index, 
                                                 x[:, current_block_start:], None, factor)
             x[:, current_block_start:][transfer_index] = x0[transfer_index]
-            
             i += 1
 
+            if early_stop:
+                pos = torch.arange(x.shape[1], device = x.device).unsqueeze(0)
+                eos_mask = (x == eos_id)
+                first_eos = torch.where(eos_mask, pos, x.shape[1]).amin(dim=1)
+                after_first = pos > first_eos.unsqueeze(1)
+
+                x[after_first] = eos_id
+
+        if early_stop and  (x[transfer_index] == eos_id).any():
+            return x, nfe
 
     return x, nfe
 
 
 @ torch.no_grad()
 def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-            remasking='low_confidence', mask_id=126336, threshold=None, factor=None):
+            remasking='low_confidence', mask_id=126336, threshold=None, factor=None, early_stop = False):
     '''
     Args:
         model: Mask predictor.
@@ -199,6 +227,8 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
         remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
     '''
+    eos_id = 126081
+
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
 
@@ -247,6 +277,16 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
                                                 x[:, current_block_start:current_block_end], None, factor)
             x[:, current_block_start:current_block_end][transfer_index] = x0[transfer_index]
             i += 1
+            if early_stop:
+                pos = torch.arange(x.shape[1], device = x.device).unsqueeze(0)
+                eos_mask = (x == eos_id)
+                first_eos = torch.where(eos_mask, pos, x.shape[1]).amin(dim=1)
+                after_first = pos > first_eos.unsqueeze(1)
+
+                x[after_first] = eos_id
+                
+        if early_stop and  (x[transfer_index] == eos_id).any():
+            return x, nfe
 
     return x, nfe
 
