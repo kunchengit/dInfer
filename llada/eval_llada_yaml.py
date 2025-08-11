@@ -37,8 +37,8 @@ class TaskName(Enum):
     gsm8k_llada_base = ("gsm8k", ModelName.llada_base, 5)
     gsm8k_llada_unknown = ("gsm8k", ModelName.llada_unknown, 5)
 
-    minerva_math_llada15 = ("minerva_math", ModelName.llada15, 0)
-    minerva_math_llada_instruct = ("minerva_math", ModelName.llada_instruct, 0)
+    minerva_math_llada15 = ("minerva_math", ModelName.llada15, 4)
+    minerva_math_llada_instruct = ("minerva_math", ModelName.llada_instruct, 4)
     minerva_math_llada_base = ("minerva_math", ModelName.llada_base, 4)
     minerva_math_llada_unknown = ("minerva_math", ModelName.llada_unknown, 4)
 
@@ -238,7 +238,7 @@ def main():
         --model_args {model_args} \
          {cmd_suffix}"""
     elif task_name in {TaskName.minerva_math_llada15, TaskName.minerva_math_llada_instruct}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --apply_chat_template \
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot}  --apply_chat_template \
         --confirm_run_unsafe_code --model llada_dist \
         --model_args {model_args} \
         {cmd_suffix}"""
