@@ -1,13 +1,26 @@
-class ThresholdParallelDecoder:
-    """ This decoder deocdes tokens in parallel based on a threshold.
+class ParallelDecoder:
+    """ This is a parallel decoder that decodes tokens in a block.
     """
-    def __init__(self, temperature, remasking, threshold, mask_id=126336):
-        self.threshold = threshold
+    def __init__(self, temperature, remasking, mask_id=126336):
         self.temperature = temperature
         self.remasking = remasking
         self.mask_id = mask_id
+        self.steps = []
 
-    def block_init(self, block_x, steps):
+    @property
+    def num_blocks(self):
+        return len(self.steps)
+
+    def init(self, steps, gen_length, block_length):
+        if isinstance(steps, int):
+            assert gen_length % block_length == 0
+            num_blocks = gen_length // block_length
+            assert steps % num_blocks == 0
+            self.steps = [steps // num_blocks] * num_blocks
+        else:
+            self.steps = steps
+
+    def block_init(self, block_x, block_id):
         pass
 
     def decode(self, logits, block_start, block_end, x):
@@ -24,6 +37,19 @@ class ThresholdParallelDecoder:
         x : Tensor
             The tensor where the decoded tokens are written to.
         """
+
+class ThresholdParallelDecoder(ParallelDecoder):
+    """ This decoder deocdes tokens in parallel based on a threshold.
+
+    A token with a confidence score that is larger than a threshold is decoded.
+    """
+    def __init__(self, temperature, remasking, threshold, mask_id=126336):
+        super(self).__init__(temperature, remasking, mask_id)
+        self.threshold = threshold
+
+    def decode(self, logits, block_start, block_end, x):
+        """ Decode the logits in a block.
+        """
         mask_index = (x[:, block_start:block_end] == self.mask_id)
         assert mask_index.shape[1] == logits.shape[1]
 
@@ -31,33 +57,20 @@ class ThresholdParallelDecoder:
         x0, transfer_index = get_transfer_index(logits, self.temperature, self.remasking, mask_index, curr_x, None, self.threshold)
         x[:, block_start:block_end][transfer_index] = x0[transfer_index]
 
-class FixedParallelDecoder:
+class FixedParallelDecoder(ParallelDecoder):
     """ This decoder decodes a fixed number of tokens in a step.
     """
     def __init__(self, temperature, remasking, mask_id=126336):
-        self.temperature = temperature
-        self.remasking = remasking
-        self.mask_id = mask_id
+        super(self).__init__(temperature, remasking, mask_id)
         self.iter = 0
 
-    def block_init(self, block_x, steps):
+    def block_init(self, block_x, block_id):
         block_mask_index = block_x == mask_id
-        self.num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
+        self.num_transfer_tokens = get_num_transfer_tokens(block_mask_index, self.steps[block_id])
         self.iter = 0
 
     def decode(self, logits, block_start, block_end, x):
         """ Decode the logits in a block.
-
-        Parameters
-        ----------
-        logits : Tensor
-            The logits in a block
-        block_start : int
-            The location of the starting token in the block
-        block_end : int
-            The location of the ending token in the block.
-        x : Tensor
-            The tensor where the decoded tokens are written to.
         """
         mask_index = (x[:, block_start:block_end] == self.mask_id)
         assert mask_index.shape[1] == logits.shape[1]
@@ -67,28 +80,17 @@ class FixedParallelDecoder:
         self.iter += 1
         x[:, block_start:block_end][transfer_index] = x0[transfer_index]
 
-class DistParallelDecoder:
-    def __init__(self, rank, world_size):
-        self.mask_id = mask_id
+class DistParallelDecoder(ParallelDecoder):
+    """ This decodes tokens in parallel in a distributed fashion based on a threshold.
+    """
+    def __init__(self, temperature, remasking, rank, world_size, mask_id=126336):
+        super(self).__init__(temperature, remasking, mask_id)
         self.rank = rank
         self.world_size = world_size
-
-    def block_init(self, block_x, steps):
-        pass
 
     def decode(self, partial_logits, block_start, block_end, x):
         """ Decode the logits in a block.
 
-        Parameters
-        ----------
-        partial_logits : Tensor
-            The logits in a block
-        block_start : int
-            The location of the starting token in the block
-        block_end : int
-            The location of the ending token in the block.
-        x : Tensor
-            The tensor where the decoded tokens are written to.
         """
         curr_x = x[(block_start + partial_logits.start_loc):(block_start + partial_logits.end_loc)]
         mask_index = (curr_x == self.mask_id)
@@ -175,13 +177,8 @@ class DiffusionLLM:
     def prepare_x(self, prompt, steps, gen_length, block_length):
         x = torch.full((1, prompt.shape[1] + gen_length), self.decoder.mask_id, dtype=torch.long).to(self.model.device)
         x[:, :prompt.shape[1]] = prompt.clone()
-
-        assert gen_length % block_length == 0
-        num_blocks = gen_length // block_length
-
-        assert steps % num_blocks == 0
-        steps = steps // num_blocks
-        return x, [steps] * num_blocks
+        self.decoder.init(steps, gen_length, block_length)
+        return x
 
     @ torch.no_grad()
     def _generate(self, prompt, steps=128, gen_length=128, block_length=128):
@@ -192,13 +189,13 @@ class DiffusionLLM:
             gen_length: Generated answer length.
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         '''
-        x, block_steps = self.prepare_x(prompt, steps, gen_length, block_length)
+        x = self.prepare_x(prompt, steps, gen_length, block_length)
 
         nfe = 0
-        for block in range(num_blocks):
+        for block in range(self.decoder.num_blocks):
             current_block_start = prompt.shape[1] + block * block_length
             current_block_end = current_block_start + block_length
-            self.decoder.block_init(x[:, current_block_start:current_block_end], block_steps[block])
+            self.decoder.block_init(x[:, current_block_start:current_block_end], block)
             i = 0
             while (x[:, current_block_start:current_block_end] == self.decoder.mask_id).sum() > 0:
                 nfe += 1
@@ -233,14 +230,14 @@ class DiffusionLMWithCache(DiffusionLM):
             gen_length: Generated answer length.
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         '''
-        x, block_steps = self.prepare_x(prompt, steps, gen_length, block_length)
+        x = self.prepare_x(prompt, steps, gen_length, block_length)
 
         nfe = 0
         kv_cache = self.cache_factory.create(self.model) if self.cache_factory is not None else None
-        for block in range(num_blocks):
+        for block in range(self.decoder.num_blocks):
             current_block_start = prompt.shape[1] + block * block_length
             current_block_end = current_block_start + block_length
-            self.decoder.block_init(x[:, current_block_start:current_block_end], block_steps[block])
+            self.decoder.block_init(x[:, current_block_start:current_block_end], block)
 
             # Update KV-cache
             if kv_cache is not None:
@@ -286,8 +283,10 @@ class DiffusionLLMWithSP(DiffusionLM):
         if total_length % world_size != 0:
             total_length = (total_length // world_size + 1) * world_size
         x = torch.full((prompt.shape[0], total_length), mask_id, dtype=torch.long).to(self.model.device)
+        x[:, :prompt.shape[1]] = prompt.clone()
+
         if gen_length == steps:
-            steps = total_length-prompt.shape[1]
+            steps = total_length - prompt.shape[1]
             last_step = None
         elif gen_length % block_length != 0:
             steps = steps // (gen_length // block_length)
@@ -297,12 +296,11 @@ class DiffusionLLMWithSP(DiffusionLM):
             steps = steps // (gen_length // block_length)
             last_step = None
         gen_length = total_length - prompt.shape[1]
-        x[:, :prompt.shape[1]] = prompt.clone()
-
-        num_blocks = (gen_length+block_length-1) // block_length
+        num_blocks = (gen_length + block_length - 1) // block_length
         block_steps = [steps] * num_blocks
         if last_step is not None:
             block_steps[-1] = last_step
+        self.decoder.init(block_steps, gen_length, block_length)
         return x
 
     @ torch.no_grad()
@@ -316,13 +314,13 @@ class DiffusionLLMWithSP(DiffusionLM):
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         '''
         op_num = 0
-        x, block_steps = self.prepare_x(prompt, steps, gen_length, block_length)
+        x = self.prepare_x(prompt, steps, gen_length, block_length)
 
         nfe = 0
-        for block in range(num_blocks):
+        for block in range(self.decoder.num_blocks):
             current_block_start = prompt.shape[1] + block * block_length
             current_block_end = prompt.shape[1] + (block + 1) * block_length
-            self.decoder.block_init(x[:, current_block_start:current_block_end], block_steps[block])
+            self.decoder.block_init(x[:, current_block_start:current_block_end], block)
             while (x[:, current_block_start:current_block_end] == mask_id).sum()>0:
                 nfe += 1
                 part = x.shape[1] // world_size
@@ -351,6 +349,8 @@ class DiffusionLLMWithSPCache(DiffusionLM):
         if total_length % world_size != 0:
             total_length = (total_length // world_size + 1) * world_size
         x = torch.full((prompt.shape[0], total_length), mask_id, dtype=torch.long).to(model.device)
+        x[:, :prompt.shape[1]] = prompt.clone()
+
         if gen_length==steps:
             steps = total_length-prompt.shape[1]
             last_step = None
@@ -362,7 +362,10 @@ class DiffusionLLMWithSPCache(DiffusionLM):
             steps = steps // (gen_length // block_length)
             last_step = None
         gen_length = total_length - prompt.shape[1]
-        x[:, :prompt.shape[1]] = prompt.clone()
+        block_steps = [steps] * num_blocks
+        if last_step is not None:
+            block_steps[-1] = last_step
+        self.decoder.init(block_steps, gen_length, block_length)
         return x
 
     @ torch.no_grad()
@@ -376,17 +379,16 @@ class DiffusionLLMWithSPCache(DiffusionLM):
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         '''
         op_num = 0
-        num_blocks = (gen_length+block_length-1) // block_length
-        x, block_steps = self.prepare_x(prompt, steps, gen_length, block_length)
+        x = self.prepare_x(prompt, steps, gen_length, block_length)
 
         nfe = 0
         kv_cache = self.cache_factory.create(self.model)
-        for block in range(num_blocks):
+        for block in range(self.decoder.num_blocks):
             current_block_start = prompt.shape[1] + block * block_length
             current_block_end = prompt.shape[1] + (block + 1) * block_length
             # TODO(zhengda) how do i get total_length
             #current_block_end = min(current_block_end, total_length)
-            self.decoder.block_init(x[:, current_block_start:current_block_end], block_steps[block])
+            self.decoder.block_init(x[:, current_block_start:current_block_end], block)
 
             # Update KV-cache
             partial_output = kv_cache.update(x, current_block_start, current_block_end)
