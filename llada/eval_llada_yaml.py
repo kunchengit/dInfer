@@ -261,7 +261,7 @@ def main():
         --model_args {model_args} \\
          {cmd_suffix}"""
     elif task_name in {TaskName.minerva_math_llada15, TaskName.minerva_math_llada_instruct}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot}  --apply_chat_template \\
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --fewshot_as_multiturn --apply_chat_template \\
         --confirm_run_unsafe_code --model llada_dist \\
         --model_args {model_args} \\
         {cmd_suffix}"""
