@@ -208,9 +208,9 @@ def main():
     
     if  ModelName.llada15.value in model_path:
       model = ModelName.llada15
-    elif ModelName.llada_instruct in model_path:
+    elif ModelName.llada_instruct.value in model_path:
       model = ModelName.llada_instruct
-    elif ModelName.llada_base in model_path:
+    elif ModelName.llada_base.value in model_path:
       model = ModelName.llada_base
     else:
       model = ModelName.llada_unknown
