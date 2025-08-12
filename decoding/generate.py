@@ -1,24 +1,69 @@
+import torch
+
+class BlockLoc:
+    def __init__(self, start, end):
+        self.start = start
+        self.end = end
+
+class BlockIterator:
+    def __init__(self, prompt, gen_length, block_length, mask_id, device):
+        self.x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(device)
+        self.x[:, :prompt.shape[1]] = prompt.clone()
+        assert gen_length % block_length == 0
+        self.num_blocks = gen_length // block_length
+        self.iter = 0
+        self.prompt = prompt
+        self.gen_length = gen_length
+        self.block_length = block_length
+
+    def __iter__(self):
+        self.iter = 0
+        return self
+
+    def __next__(self):
+        total_length = self.gen_length + self.prompt.shape[1]
+        current_block_start = self.prompt.shape[1] + self.iter * self.block_length
+        if current_block_start >= total_length:
+            raise StopIteration
+        current_block_end = current_block_start + self.block_length
+        current_block_end = min(current_block_end, total_length)
+        self.iter += 1
+        return BlockLoc(current_block_start, current_block_end), self.x[:, current_block_start:current_block_end]
+
+class DistBlockIterator:
+    def __init__(self, prompt, gen_length, block_length, mask_id, device, rank, world_size):
+        total_length = prompt.shape[1] + gen_length
+        if total_length % world_size != 0:
+            total_length = (total_length // world_size + 1) * world_size
+        self.total_length = total_length
+        self.x = torch.full((prompt.shape[0], total_length), mask_id, dtype=torch.long).to(device)
+        self.x[:, :prompt.shape[1]] = prompt.clone()
+        self.gen_length = gen_length
+        self.block_length = block_length
+        gen_length = total_length - prompt.shape[1]
+        self.num_blocks = (gen_length + block_length - 1) // block_length
+        self.iter = 0
+
+    def __iter__(self):
+        self.iter = 0
+        return self
+
+    def __next__(self):
+        current_block_start = self.prompt.shape[1] + self.iter * self.block_length
+        if current_block_start >= self.total_length:
+            raise StopIteration
+        current_block_end = current_block_start + self.block_length
+        self.iter += 1
+        current_block_end = min(current_block_end, self.total_length)
+        return BlockLoc(current_block_start, current_block_end), self.x[:, current_block_start:current_block_end]
+
 class ParallelDecoder:
     """ This is a parallel decoder that decodes tokens in a block.
     """
-    def __init__(self, temperature, remasking, mask_id=126336):
+    def __init__(self, temperature, remasking='low_confidence', mask_id=126336):
         self.temperature = temperature
         self.remasking = remasking
         self.mask_id = mask_id
-        self.steps = []
-
-    @property
-    def num_blocks(self):
-        return len(self.steps)
-
-    def init(self, steps, gen_length, block_length):
-        if isinstance(steps, int):
-            assert gen_length % block_length == 0
-            num_blocks = gen_length // block_length
-            assert steps % num_blocks == 0
-            self.steps = [steps // num_blocks] * num_blocks
-        else:
-            self.steps = steps
 
     def block_init(self, block_x, block_id):
         pass
@@ -43,7 +88,7 @@ class ThresholdParallelDecoder(ParallelDecoder):
 
     A token with a confidence score that is larger than a threshold is decoded.
     """
-    def __init__(self, temperature, remasking, threshold, mask_id=126336):
+    def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336):
         super(self).__init__(temperature, remasking, mask_id)
         self.threshold = threshold
 
@@ -58,15 +103,17 @@ class ThresholdParallelDecoder(ParallelDecoder):
         x[:, block_start:block_end][transfer_index] = x0[transfer_index]
 
 class FixedParallelDecoder(ParallelDecoder):
-    """ This decoder decodes a fixed number of tokens in a step.
+    """ This decoder decodes tokens in a fixed number of steps.
     """
-    def __init__(self, temperature, remasking, mask_id=126336):
+    def __init__(self, temperature, steps, remasking='low_confidence', mask_id=126336):
         super(self).__init__(temperature, remasking, mask_id)
+        self.steps = steps
         self.iter = 0
 
     def block_init(self, block_x, block_id):
+        # TODO(zhengda) we need to handle steps correctly here when the distributed version changes the gen length.
         block_mask_index = block_x == mask_id
-        self.num_transfer_tokens = get_num_transfer_tokens(block_mask_index, self.steps[block_id])
+        self.num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
         self.iter = 0
 
     def decode(self, logits, block_start, block_end, x):
@@ -83,7 +130,7 @@ class FixedParallelDecoder(ParallelDecoder):
 class DistParallelDecoder(ParallelDecoder):
     """ This decodes tokens in parallel in a distributed fashion based on a threshold.
     """
-    def __init__(self, temperature, remasking, rank, world_size, mask_id=126336):
+    def __init__(self, temperature, rank, world_size, remasking='low_confidence', mask_id=126336):
         super(self).__init__(temperature, remasking, mask_id)
         self.rank = rank
         self.world_size = world_size
@@ -174,12 +221,6 @@ class DiffusionLLM:
         self.model = model
         self.decoder = decoder
 
-    def prepare_x(self, prompt, steps, gen_length, block_length):
-        x = torch.full((1, prompt.shape[1] + gen_length), self.decoder.mask_id, dtype=torch.long).to(self.model.device)
-        x[:, :prompt.shape[1]] = prompt.clone()
-        self.decoder.init(steps, gen_length, block_length)
-        return x
-
     @ torch.no_grad()
     def _generate(self, prompt, steps=128, gen_length=128, block_length=128):
         '''
@@ -189,19 +230,17 @@ class DiffusionLLM:
             gen_length: Generated answer length.
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         '''
-        x = self.prepare_x(prompt, steps, gen_length, block_length)
+        it = BlockIterator(prompt, gen_length, block_length, self.decoder.mask_id, self.model.device)
 
         nfe = 0
-        for block in range(self.decoder.num_blocks):
-            current_block_start = prompt.shape[1] + block * block_length
-            current_block_end = current_block_start + block_length
-            self.decoder.block_init(x[:, current_block_start:current_block_end], block)
+        for block_id, (block_loc, block) in enumerate(it):
+            self.decoder.block_init(block, block_id)
             i = 0
-            while (x[:, current_block_start:current_block_end] == self.decoder.mask_id).sum() > 0:
+            while (block == self.decoder.mask_id).sum() > 0:
                 nfe += 1
                 logits = self.model(x).logits
                 # TODO(zhengda) is logits 2-D?
-                self.decoder.decode(logits[:, current_block_start:current_block_end], current_block_start, current_block_end, x)
+                self.decoder.decode(logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
                 i += 1
         return x, nfe
 
@@ -215,7 +254,7 @@ class DiffusionLLM:
             nfes.append(nfe)
         return res, nfes
 
-class DiffusionLMWithCache(DiffusionLM):
+class DiffusionLLMWithCache(DiffusionLLM):
     def __init__(self, model, cache_factory, decoder):
         self.model = model
         self.cache_factory = cache_factory
@@ -230,35 +269,34 @@ class DiffusionLMWithCache(DiffusionLM):
             gen_length: Generated answer length.
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         '''
-        x = self.prepare_x(prompt, steps, gen_length, block_length)
+        it = BlockIterator(prompt, gen_length, block_length, self.decoder.mask_id, self.model.device)
 
         nfe = 0
         kv_cache = self.cache_factory.create(self.model) if self.cache_factory is not None else None
-        for block in range(self.decoder.num_blocks):
-            current_block_start = prompt.shape[1] + block * block_length
-            current_block_end = current_block_start + block_length
-            self.decoder.block_init(x[:, current_block_start:current_block_end], block)
+        for block_id, (block_loc, block) in enumerate(it):
+            self.decoder.block_init(block, block_id)
 
             # Update KV-cache
             if kv_cache is not None:
-                output = kv_cache.update(x, current_block_start, current_block_end)
+                output = kv_cache.update(x, block_loc.start, block_loc.end)
                 # use the generated output to decode.
-                self.decoder.decode(output.logits[:, current_block_start:current_block_end], current_block_start, current_block_end, x)
+                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
                 nfe += 1
 
             past_key_values, replace_position = kv_cache.get_key_values()
-            while (x[:, current_block_start:current_block_end] == mask_id).sum() > 0:
+            while (block == mask_id).sum() > 0:
                 nfe += 1
                 if kv_cache is None:
-                    logits = model(x).logits[:, current_block_start:current_block_end]
+                    logits = model(x).logits[:, block_loc.start:block_loc.end]
                 elif replace_position is None:
-                    logits = model(x[:, current_block_start:], past_key_values=past_key_values, use_cache=True).logits
+                    logits = model(x[:, block_loc.start:], past_key_values=past_key_values, use_cache=True).logits
+                    block_length = block_loc.end - block_loc.start
                     logits = logits[:, :block_length]
                 else:
                     # cache position is the position between current_block_start and current_block_end
-                    logits = model(x[:, current_block_start:current_block_end], past_key_values=past_key_values, use_cache=True,
+                    logits = model(block, past_key_values=past_key_values, use_cache=True,
                                    replace_position=replace_position).logits
-                self.decoder.decode(logits, current_block_start, current_block_end, x)
+                self.decoder.decode(logits, block_loc.start, block_loc.end, x)
 
         return x, nfe
 
@@ -270,38 +308,13 @@ def gather_block_logits(partial_logits, partial_start, partial_end, block_start,
     return logits.permute(1, 0, 2, 3).reshape(B, world_size*L, V)
 
 
-class DiffusionLLMWithSP(DiffusionLM):
+class DiffusionLLMWithSP(DiffusionLLM):
     def __init__(self, model, cache_factory, decoder, rank=0, world_size=1):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
         self.rank = rank
         self.world_size = world_size
-
-    def prepare_x(self, prompt, steps, gen_length, block_length):
-        total_length = prompt.shape[1] + gen_length
-        if total_length % world_size != 0:
-            total_length = (total_length // world_size + 1) * world_size
-        x = torch.full((prompt.shape[0], total_length), mask_id, dtype=torch.long).to(self.model.device)
-        x[:, :prompt.shape[1]] = prompt.clone()
-
-        if gen_length == steps:
-            steps = total_length - prompt.shape[1]
-            last_step = None
-        elif gen_length % block_length != 0:
-            steps = steps // (gen_length // block_length)
-            residual = (total_length - prompt.shape[1]) % block_length
-            last_step = max(min(int(residual * steps / block_length)+1, residual), 1)
-        else:
-            steps = steps // (gen_length // block_length)
-            last_step = None
-        gen_length = total_length - prompt.shape[1]
-        num_blocks = (gen_length + block_length - 1) // block_length
-        block_steps = [steps] * num_blocks
-        if last_step is not None:
-            block_steps[-1] = last_step
-        self.decoder.init(block_steps, gen_length, block_length)
-        return x
 
     @ torch.no_grad()
     def _generate(model, prompt, steps=128, gen_length=128, block_length=128):
@@ -314,59 +327,27 @@ class DiffusionLLMWithSP(DiffusionLM):
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         '''
         op_num = 0
-        x = self.prepare_x(prompt, steps, gen_length, block_length)
+        it = BlockIterator(prompt, gen_length, block_length, self.decoder.mask_id, self.model.device)
 
         nfe = 0
-        for block in range(self.decoder.num_blocks):
-            current_block_start = prompt.shape[1] + block * block_length
-            current_block_end = prompt.shape[1] + (block + 1) * block_length
-            self.decoder.block_init(x[:, current_block_start:current_block_end], block)
-            while (x[:, current_block_start:current_block_end] == mask_id).sum()>0:
+        for block_id, (block_loc, block) in enumerate(it):
+            self.decoder.block_init(block, block_id)
+            while (block == mask_id).sum()>0:
                 nfe += 1
                 part = x.shape[1] // world_size
                 partial_logits = model(x[:, (rank * part):((rank + 1) * part)].clone()).logits
-                logits = gather_block_logits(partial_logits, rank * part, (rank + 1) * part, current_block_start, current_block_end)
+                logits = gather_block_logits(partial_logits, rank * part, (rank + 1) * part, block_loc.start, block_loc.end)
                 op_num += calculate_op_num(x[:, rank*part:(rank+1)*part])
-                self.decoder.decode(logits, current_block_start, current_block_end, x)
+                self.decoder.decode(logits, block_loc.start, block_loc.end, x)
         return x, nfe
 
-class DiffusionLLMWithSPCache(DiffusionLM):
+class DiffusionLLMWithSPCache(DiffusionLLM):
     def __init__(self, model, cache_factory, decoder, rank=0, world_size=1):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
         self.rank = rank
         self.world_size = world_size
-
-    def prepare_x(self, prompt, steps, gen_length, block_length):
-        if prompt.shape[1] % world_size !=0:
-            # TODO(zhengda) what is 126081?
-            new_prompt = torch.full((prompt.shape[0], prompt.shape[1] + world_size - prompt.shape[1]%world_size), 126081, dtype=prompt.dtype, device=prompt.device)
-            new_prompt[:, -prompt.shape[1]:] = prompt
-            prompt = new_prompt
-
-        total_length = prompt.shape[1] + gen_length
-        if total_length % world_size != 0:
-            total_length = (total_length // world_size + 1) * world_size
-        x = torch.full((prompt.shape[0], total_length), mask_id, dtype=torch.long).to(model.device)
-        x[:, :prompt.shape[1]] = prompt.clone()
-
-        if gen_length==steps:
-            steps = total_length-prompt.shape[1]
-            last_step = None
-        elif gen_length % block_length != 0:
-            steps = steps // (gen_length // block_length)
-            residual = (total_length - prompt.shape[1]) % block_length
-            last_step = max(min(int(residual * steps / block_length)+1, residual), 1)
-        else:
-            steps = steps // (gen_length // block_length)
-            last_step = None
-        gen_length = total_length - prompt.shape[1]
-        block_steps = [steps] * num_blocks
-        if last_step is not None:
-            block_steps[-1] = last_step
-        self.decoder.init(block_steps, gen_length, block_length)
-        return x
 
     @ torch.no_grad()
     def _generate(self, prompt, steps=128, gen_length=128, block_length=128):
@@ -379,30 +360,23 @@ class DiffusionLLMWithSPCache(DiffusionLM):
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         '''
         op_num = 0
-        x = self.prepare_x(prompt, steps, gen_length, block_length)
+        it = BlockIterator(prompt, gen_length, block_length, self.decoder.mask_id, self.model.device)
 
         nfe = 0
         kv_cache = self.cache_factory.create(self.model)
-        for block in range(self.decoder.num_blocks):
-            current_block_start = prompt.shape[1] + block * block_length
-            current_block_end = prompt.shape[1] + (block + 1) * block_length
-            # TODO(zhengda) how do i get total_length
-            #current_block_end = min(current_block_end, total_length)
-            self.decoder.block_init(x[:, current_block_start:current_block_end], block)
+        for block_id, (block_loc, block) in enumerate(it):
+            self.decoder.block_init(block, block_id)
 
             # Update KV-cache
-            partial_output = kv_cache.update(x, current_block_start, current_block_end)
+            partial_output = kv_cache.update(x, block_loc.start, block_loc.end)
             # use the generated output to decode.
-            logits = gather_block_logits(partial_output.logits, rank * part, (rank + 1) * part, current_block_start, current_block_end)
-            self.decoder.decode(logits, current_block_start, current_block_end, x)
+            logits = gather_block_logits(partial_output.logits, rank * part, (rank + 1) * part, block_loc.start, block_loc.end)
+            self.decoder.decode(logits, block_loc.start, block_loc.end, x)
             op_num += calculate_op_num(x[:, rank*part:(rank+1)*part])
 
             nfe += 1
-            while (x[:, current_block_start:current_block_end] == mask_id).sum()>0:
+            while (block == mask_id).sum()>0:
                 nfe += 1
-                mask_index = (x[:, current_block_start:] == mask_id)
-                mask_index[:, block_length:] = 0
-
                 # TODO(zhengda) do we have to duplicate the kv-cache?
                 past_key_values = kv_cache.get_past_key_values()
                 new_past_key_values = []
@@ -412,9 +386,9 @@ class DiffusionLLMWithSPCache(DiffusionLM):
                         new_past_key_values[ii] += (past_key_values[ii][jj].clone(),)
                 past_key_values = new_past_key_values
 
-                part = (total_length - current_block_start) // world_size
-                partial_logits = model(x[:, current_block_start+rank*part:current_block_start+(rank+1)*part].clone(), past_key_values=past_key_values, use_cache=True).logits
-                logits = gather_block_logits(partial_output.logits, current_block_start + rank * part, current_block_start + (rank + 1) * part, current_block_start, current_block_end)
-                op_num += calculate_op_num(x[:, current_block_start+rank*part:current_block_start+(rank+1)*part], cache_length=total_length)
-                self.decoder.decode(logits, current_block_start, current_block_end, x)
-    return x, nfe
+                part = (total_length - block_loc.start) // world_size
+                partial_logits = model(x[:, block_loc.start+rank*part:block_loc.start+(rank+1)*part].clone(), past_key_values=past_key_values, use_cache=True).logits
+                logits = gather_block_logits(partial_output.logits, block_loc.start + rank * part, block_loc.start + (rank + 1) * part, block_loc.start, block_loc.end)
+                op_num += calculate_op_num(x[:, block_loc.start + rank * part:block_loc.start+(rank+1)*part], cache_length=total_length)
+                self.decoder.decode(logits, block_loc.start, block_loc.end, x)
+        return x, nfe
