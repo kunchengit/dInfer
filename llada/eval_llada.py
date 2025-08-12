@@ -401,8 +401,8 @@ class LLaDAEvalHarness(LM):
                       'average forward calls per token': total_nfe / total_tokens,
                       'tokens per second': total_tokens / total_time,
                       'tokens per second our': total_tokens_with_eos / total_time,
-                      'tpf w/o eos': total_time / total_tokens,
-                      'tpf with eos': total_time / total_tokens_with_eos,
+                      'tpf w/o eos': total_tokens / total_nfe,
+                      'tpf with eos': total_tokens_with_eos / total_nfe,
                       'average generated length': total_tokens / total_samples
                       }
                 file.write(json.dumps(data, ensure_ascii=False) + '\n')

@@ -59,56 +59,75 @@ class TaskName(Enum):
 
 
 def process_results(root_dir: str, task_name: TaskName):
-    for dirpath, dirnames, filenames in tqdm(os.walk(root_dir), desc='merging results...'):
-        # if 'Instruct' in dirpath:
-        #     continue
-        # print(f"当前目录: {dirpath}")
-        afcpt = 0
-        afcpt_file = os.path.join(dirpath, 'afcpt.json')
-        rank_num = 0
-        results_file = os.path.join(dirpath, 'all_results.json')
-        all_hists = []
-        speed = 0
-        results_file = None
-        speed_our = 0
-        for filename in filenames:
-            file_path = os.path.join(dirpath, filename)
-            if '_afcpt' in filename:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        data = json.loads(line)
-                        afcpt += data['average forward calls per token'] 
-                        if 'hist' in data:
-                            all_hists.append(data["hist"])
-                        if 'tokens per second' in data:
-                            speed += data['tokens per second']
-                        if 'tokens per second our' in data:
-                            speed_our += data['tokens per second our']
-                rank_num += 1
-            if 'results' in filename:
-                results_file = os.path.join(dirpath, filename)
-            if 'samples_humaneval' in filename:
-                if results_file is not None:
-                    with open(results_file, 'r', encoding='utf-8') as rfile:
-                        results = json.load(rfile)
-                    if "post_process_pass@1" in results["results"][task_name.task_id]:
-                        continue
-                    humaneval_result = eval_code(file_path)
-                    results["results"][task_name.task_id]["post_process_pass@1"] = humaneval_result
-                    with open(results_file, 'w', encoding='utf-8') as rfile:
-                        rfile.write(json.dumps(results, ensure_ascii=False, indent=4))
-        if afcpt != 0:
-            with open(afcpt_file, 'w', encoding='utf-8') as f:
-                data = {'average forward calls per token': afcpt / rank_num}
-                if len(all_hists) > 0:
-                    hist = list(map(sum, zip(*all_hists)))
-                    data['hist'] = hist
-                    data['hist_distrubution'] = [x / sum(hist) for x in hist]
-                if speed > 0:
-                    data['tokens per second'] = speed / rank_num
-                if speed_our > 0:
-                    data['tokens per second our'] = speed_our / rank_num
-                f.write(json.dumps(data, ensure_ascii=False) + '\n')
+  for dirpath, dirnames, filenames in tqdm(os.walk(root_dir), desc='merging results...'):
+    # if 'Instruct' in dirpath:
+    #     continue
+    # print(f"当前目录: {dirpath}")
+    afcpt = 0
+    afcpt_file = os.path.join(dirpath, 'afcpt.json')
+    rank_num = 0
+    results_file = os.path.join(dirpath, 'all_results.json')
+    all_hists = []
+    tps = 0.0
+    results_file = None
+    tps_eos = 0.0
+    tpf = 0.0
+    tpf_eos = 0.0
+    gen_len = 0.0
+    for filename in filenames:
+      file_path = os.path.join(dirpath, filename)
+      if '_afcpt' in filename:
+        with open(file_path, 'r', encoding='utf-8') as f:
+          for line in f:
+            data = json.loads(line)
+            afcpt += data['average forward calls per token'] 
+            if 'hist' in data:
+              all_hists.append(data["hist"])
+            if 'tokens per second' in data:
+              tps += data['tokens per second']
+            if 'tokens per second our' in data:
+              tps_eos += data['tokens per second our']
+            if 'tpf w/o eos' in data:
+              tpf += data['tpf w/o eos']
+            if 'tpf with eos' in data:
+              tpf_eos += data['tpf with eos']
+            if 'average generated length' in data:
+              gen_len += data['average generated length']
+          rank_num += 1
+      
+      if 'results' in filename:
+        results_file = os.path.join(dirpath, filename)
+      if 'samples_humaneval' in filename:
+        if results_file is not None:
+          with open(results_file, 'r', encoding='utf-8') as rfile:
+            results = json.load(rfile)
+          
+          if "post_process_pass@1" in results["results"][task_name.task_id]:
+            continue
+          
+          humaneval_result = eval_code(file_path)
+          results["results"][task_name.task_id]["post_process_pass@1"] = humaneval_result
+          with open(results_file, 'w', encoding='utf-8') as rfile:
+            rfile.write(json.dumps(results, ensure_ascii=False, indent=4))
+    if afcpt != 0:
+      with open(afcpt_file, 'w', encoding='utf-8') as f:
+        data = {'average forward calls per token': afcpt / rank_num}
+        if len(all_hists) > 0:
+          hist = list(map(sum, zip(*all_hists)))
+          data['hist'] = hist
+          data['hist_distrubution'] = [x / sum(hist) for x in hist]
+        if tps > 0:
+          data['tokens per second'] = tps / rank_num
+        if tps_eos > 0:
+          data['tokens per second our'] = tps_eos / rank_num
+        if tpf > 0:
+          data['tpf w/o eos'] = tpf / rank_num
+        if tpf_eos > 0:
+          data['tpf with eos'] = tpf_eos / rank_num
+        if gen_len > 0:
+          data["average generated length"] = gen_len / rank_num
+
+        f.write(json.dumps(data, ensure_ascii=False) + '\n')
 
 
 def find_results_json(folder):
@@ -218,7 +237,7 @@ def main():
     additional_params = ",".join([f"{k}={v}" for k, v in cfg.items() if k not in ignore_keys])
 
     model_args = f"model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params}"
-    cmd_suffix = f"--output_path {output_path} --include_path {TASK_DIR}" + ("" if args.limit is None else f"--limit {args.limit}")
+    cmd_suffix = f"--output_path {output_path} --include_path {TASK_DIR}" + ("" if args.limit is None else f" --limit {args.limit}")
     
     if task_name in {TaskName.humaneval_llada15, TaskName.humaneval_llada_instruct}:
         ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --apply_chat_template \\
@@ -276,8 +295,6 @@ def main():
       continue
     
     print (ext_cmd)
-    input()
-    exit(0)
 
     subprocess.run(ext_cmd, shell = True, check = True)
     # task_list.append(task)
