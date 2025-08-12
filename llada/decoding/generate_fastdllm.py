@@ -114,7 +114,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
             if (x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (num_block + 1) * block_length] == mask_id).sum() == 0:
                 break
         
-        if early_stop and  (x[transfer_index] == eos_id).any():
+        if early_stop and  (x == eos_id).any():
             return x, nfe
 
     return x, nfe
@@ -206,7 +206,7 @@ def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_l
 
                 x[after_first] = eos_id
 
-        if early_stop and  (x[transfer_index] == eos_id).any():
+        if early_stop and  (x == eos_id).any():
             return x, nfe
 
     return x, nfe
@@ -285,7 +285,7 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
 
                 x[after_first] = eos_id
                 
-        if early_stop and  (x[transfer_index] == eos_id).any():
+        if early_stop and  (x == eos_id).any():
             return x, nfe
 
     return x, nfe

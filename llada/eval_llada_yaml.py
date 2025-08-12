@@ -145,8 +145,12 @@ def extract_from_afcpt_json(path):
         data = json.load(f)
     avg_calls = data.get("average forward calls per token")
     tps = data.get("tokens per second")
-    tps_our = data.get("tokens per second our")
-    return avg_calls, tps, tps_our
+    tps_with_eos = data.get("tokens per second our")
+    tpf_wo_eos = data.get('tpf w/o eos')
+    tpf_with_eos = data.get('tpf with eos')
+    average_generated_length = data.get('average generated length')
+
+    return avg_calls, tps, tps_with_eos, tpf_wo_eos, tpf_with_eos, average_generated_length
 
 def get_default_fewshot_num(task):
   fewshot_dict = {
@@ -214,74 +218,66 @@ def main():
     additional_params = ",".join([f"{k}={v}" for k, v in cfg.items() if k not in ignore_keys])
 
     model_args = f"model_path={model_path},gen_length={length},steps={steps},block_length={block_length},decoding={decoding},show_speed={show_speed},log_generated_items={log_generated_items},save_dir={output_path},{additional_params}"
-    cmd_suffix = f"--output_path {output_path} --include_path {TASK_DIR}" + "" if args.limit is None else f"--limit {args.limit}"
+    cmd_suffix = f"--output_path {output_path} --include_path {TASK_DIR}" + ("" if args.limit is None else f"--limit {args.limit}")
     
     if task_name in {TaskName.humaneval_llada15, TaskName.humaneval_llada_instruct}:
         ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --apply_chat_template \\
         --confirm_run_unsafe_code --model llada_dist \\
-        --model_args {model_args} \
-        --log_samples \
+        --model_args {model_args} \\
+        --log_samples \\
         {cmd_suffix}"""
     elif task_name in {TaskName.gsm8k_llada15, TaskName.gsm8k_llada_instruct}:
-        ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot if num_fewshot < 5 else 4} --fewshot_as_multiturn --apply_chat_template \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
+        ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot if num_fewshot < 5 else 4} --fewshot_as_multiturn --apply_chat_template \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args {model_args} \\
         {cmd_suffix} """
     elif task_name in {TaskName.humaneval_llada_base, TaskName.humaneval_llada_unknown}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args {model_args} \\
         --log_samples {cmd_suffix}"""
     elif task in {TaskName.gsm8k_llada_base, TaskName.gsm8k_llada_unknown}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args {model_args} \\
          {cmd_suffix}"""
     elif task_name in {TaskName.minerva_math_llada15, TaskName.minerva_math_llada_instruct}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot}  --apply_chat_template \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot}  --apply_chat_template \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args {model_args} \\
         {cmd_suffix}"""
     elif task_name in {TaskName.minerva_math_llada_base, TaskName.minerva_math_llada_unknown}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
-         {cmd_suffix}"""
-    elif task_name in {TaskName.minerva_math_llada_instruct, TaskName.minerva_math_llada15}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --apply_chat_template \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
-        {cmd_suffix}"""
-    elif task_name in {TaskName.minerva_math_llada_unknown, TaskName.minerva_math_llada_base}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args {model_args} \\
          {cmd_suffix}"""
     elif task_name in {TaskName.mbpp_llada15, TaskName.mbpp_llada_instruct}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --apply_chat_template \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --apply_chat_template \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args {model_args} \\
          {cmd_suffix}"""
     elif task_name in {TaskName.mbpp_llada_base, TaskName.mbpp_llada_unknown}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args {model_args} \\
          {cmd_suffix}"""
     elif task_name in {TaskName.bbh_llada15, TaskName.bbh_llada_instruct}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --apply_chat_template \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} --apply_chat_template \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args {model_args} \\
          {cmd_suffix}"""
     elif task_name in {TaskName.bbh_llada_base, TaskName.bbh_llada_unknown}:
-      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \
-        --confirm_run_unsafe_code --model llada_dist \
-        --model_args {model_args} \
+      ext_cmd = f"""accelerate launch eval_llada.py --tasks {task_name.task_id} --num_fewshot {num_fewshot} \\
+        --confirm_run_unsafe_code --model llada_dist \\
+        --model_args {model_args} \\
          {cmd_suffix}"""
     else:
       #raise TypeError(r"Unsupported task: 'task'")
       continue
     
     print (ext_cmd)
+    input()
+    exit(0)
 
     subprocess.run(ext_cmd, shell = True, check = True)
     # task_list.append(task)
@@ -295,7 +291,7 @@ def main():
     afcpt_json = find_afcpt_json(output_path)
 
     exact_match_flex = extract_from_results_json(results_json, task_name) if results_json else None
-    avg_calls, tps, tps_our = (extract_from_afcpt_json(afcpt_json) if afcpt_json else (None, None, None))
+    avg_calls, tps, tps_with_eos, tpf_wo_eos, tpf_with_eos, average_generated_length = (extract_from_afcpt_json(afcpt_json) if afcpt_json else (None, None, None, None, None, None))
 
     rows.append({
         "task": task,
@@ -309,7 +305,10 @@ def main():
         "score": exact_match_flex,
         "average forward calls per token": avg_calls,
         "tokens per second": tps,
-        "tokens per second our": tps_our,
+        "tokens per second our": tps_with_eos,
+        'tpf w/o eos': tpf_wo_eos,
+        'tpf with eos': tpf_with_eos,
+        'average generated length': average_generated_length,
         "eval timestamp": ts
     })
 
@@ -321,7 +320,7 @@ def main():
     with open(summary_output, "a", newline="") as csvfile:
         fieldnames = ["task","length","block_length","steps","eval timestamp","model","decoding","num fewshot",
                       "additional_params","score","average forward calls per token","tokens per second",
-                      "tokens per second our"]
+                      "tokens per second our", 'tpf w/o eos', 'tpf with eos', 'average generated length']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         if write_header:
             writer.writeheader()
