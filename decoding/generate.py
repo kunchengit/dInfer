@@ -1,4 +1,36 @@
 import torch
+import numpy as np
+import torch.nn.functional as F
+
+from utils import add_gumbel_noise
+
+def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold=None):
+    logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+    x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
+
+    if remasking == 'low_confidence':
+        p = F.softmax(logits.to(torch.float64), dim=-1)
+        x0_p = torch.squeeze(
+            torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
+    elif remasking == 'random':
+        x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+    else:
+        raise NotImplementedError(remasking)
+
+    x0 = torch.where(mask_index, x0, x)
+    confidence = torch.where(mask_index, x0_p, -np.inf)
+
+    transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+    if threshold is not None:
+        num_transfer_tokens = mask_index.sum(dim=1, keepdim=True)
+    for j in range(confidence.shape[0]):
+        _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j])
+        transfer_index[j, select_index] = True
+        if threshold is not None:
+            for k in range(1, num_transfer_tokens[j]):
+                if confidence[j, select_index[k]] < threshold:
+                    transfer_index[j, select_index[k]] = False
+    return x0, transfer_index
 
 class BlockLoc:
     def __init__(self, start, end):
@@ -89,7 +121,7 @@ class ThresholdParallelDecoder(ParallelDecoder):
     A token with a confidence score that is larger than a threshold is decoded.
     """
     def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336):
-        super(self).__init__(temperature, remasking, mask_id)
+        super().__init__(temperature, remasking, mask_id)
         self.threshold = threshold
 
     def decode(self, logits, block_start, block_end, x):
@@ -106,7 +138,7 @@ class FixedParallelDecoder(ParallelDecoder):
     """ This decoder decodes tokens in a fixed number of steps.
     """
     def __init__(self, temperature, steps, remasking='low_confidence', mask_id=126336):
-        super(self).__init__(temperature, remasking, mask_id)
+        super().__init__(temperature, remasking, mask_id)
         self.steps = steps
         self.iter = 0
 
@@ -131,7 +163,7 @@ class DistParallelDecoder(ParallelDecoder):
     """ This decodes tokens in parallel in a distributed fashion based on a threshold.
     """
     def __init__(self, temperature, rank, world_size, remasking='low_confidence', mask_id=126336):
-        super(self).__init__(temperature, remasking, mask_id)
+        super().__init__(temperature, remasking, mask_id)
         self.rank = rank
         self.world_size = world_size
 
@@ -238,11 +270,11 @@ class DiffusionLLM:
             i = 0
             while (block == self.decoder.mask_id).sum() > 0:
                 nfe += 1
-                logits = self.model(x).logits
+                logits = self.model(it.x).logits
                 # TODO(zhengda) is logits 2-D?
-                self.decoder.decode(logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
+                self.decoder.decode(logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, it.x)
                 i += 1
-        return x, nfe
+        return it.x, nfe
 
     @ torch.no_grad()
     def generate(self, prompts, steps=128, gen_length=128, block_length=128):
@@ -278,27 +310,27 @@ class DiffusionLLMWithCache(DiffusionLLM):
 
             # Update KV-cache
             if kv_cache is not None:
-                output = kv_cache.update(x, block_loc.start, block_loc.end)
+                output = kv_cache.update(it.x, block_loc.start, block_loc.end)
                 # use the generated output to decode.
-                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
+                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, it.x)
                 nfe += 1
 
             past_key_values, replace_position = kv_cache.get_key_values()
             while (block == mask_id).sum() > 0:
                 nfe += 1
                 if kv_cache is None:
-                    logits = model(x).logits[:, block_loc.start:block_loc.end]
+                    logits = model(it.x).logits[:, block_loc.start:block_loc.end]
                 elif replace_position is None:
-                    logits = model(x[:, block_loc.start:], past_key_values=past_key_values, use_cache=True).logits
+                    logits = model(it.x[:, block_loc.start:], past_key_values=past_key_values, use_cache=True).logits
                     block_length = block_loc.end - block_loc.start
                     logits = logits[:, :block_length]
                 else:
                     # cache position is the position between current_block_start and current_block_end
                     logits = model(block, past_key_values=past_key_values, use_cache=True,
                                    replace_position=replace_position).logits
-                self.decoder.decode(logits, block_loc.start, block_loc.end, x)
+                self.decoder.decode(logits, block_loc.start, block_loc.end, it.x)
 
-        return x, nfe
+        return it.x, nfe
 
 def gather_block_logits(partial_logits, partial_start, partial_end, block_start, block_end):
     # TODO(zhengda)
