@@ -361,7 +361,7 @@ class LLaDAEvalHarness(LM):
             # calc statitics
             if self.show_speed:
                 one_time = time.time() - start_time
-                num_tokens = int((generated_answer != 126081).sum())
+                num_tokens = int((generated_answer != 126081).sum()) - int(input_ids.shape[1])
                 total_tokens += num_tokens
                 total_tokens_with_eos += self.gen_length
                 total_nfe += nfe
