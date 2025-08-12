@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
-from utils import add_gumbel_noise
+from .utils import add_gumbel_noise
 
 def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold=None):
     logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
