@@ -36,7 +36,7 @@ from typing import (
     cast,
 )
 from dataclasses import fields
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Literal
 try:
     from torch.nn.attention.flex_attention import flex_attention, create_block_mask
     FLEX_ATTN_AVAILABLE = True
@@ -46,6 +46,7 @@ import torch
 import torch.backends.cuda
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch import einsum
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -70,6 +71,12 @@ elif sys.version_info.minor == 8:
 else:
     raise SystemExit("This script supports Python 3.8 or higher")
 
+import re
+from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                        ReplicatedLinear,
+                        RowParallelLinear)
+
 __all__ = [
     "LayerNormBase",
     "LayerNorm",
@@ -86,6 +93,39 @@ __all__ = [
     "LLaDAOutput",
     "LLaDAGenerateOutput",
 ]
+
+
+def replace_linear_class(
+    linear: nn.Linear, style: Literal["colwise", "rowwise"],
+    quant_config,
+) -> Union[ColumnParallelLinear, RowParallelLinear]:
+    """
+    Replace nn.Linear with one of vLLM's tensor parallel linear classes.
+
+    Args:
+        linear (nn.Linear): `nn.Linear` to be replaced.
+        style (str): Tensor parallel style of the new linear, e.g. "colwise".
+        quant_config (QuantConfig): Quantization config for the new linear.
+    Returns:
+        Union[ColumnParallelLinear, RowParallelLinear]: The new linear.
+    """
+
+    if not isinstance(style, str):
+        raise ValueError(
+            f"Unsupported parallel style type {type(style)}, expected str")
+
+    vllm_linear_cls = {
+        "colwise": ColumnParallelLinear,
+        "rowwise": RowParallelLinear,
+    }.get(style, ReplicatedLinear)
+
+    return vllm_linear_cls(
+        input_size=linear.in_features,
+        output_size=linear.out_features,
+        bias=linear.bias is not None,
+        quant_config=quant_config,
+        return_bias=False,
+    )
 
 
 log = logging.getLogger(__name__)
@@ -704,6 +744,7 @@ class LLaDABlock(nn.Module):
         B, T, C = q.size()  # batch size, sequence length, d_model
         dtype = k.dtype
 
+        tp_size = self.tp_size if hasattr(self, "tp_size") else 1
         # Optionally apply layer norm to keys and queries.
         if self.q_norm is not None and self.k_norm is not None: #self.q_norm: None, self.k_norm: None
             q = self.q_norm(q).to(dtype=dtype)
@@ -712,11 +753,13 @@ class LLaDABlock(nn.Module):
         # Move head forward to be next to the batch dim.
         # shape: (B, nh, T, hs)
         # self.config.n_heads: 32
-        q = q.view(B, T, self.config.n_heads, C // self.config.n_heads).transpose(1, 2)
+        actual_nheads = self.config.n_heads//tp_size
+        actual_kv_heads = self.config.effective_n_kv_heads//tp_size        
+        q = q.view(B, T, actual_nheads, C // actual_nheads).transpose(1, 2)
         # shape: (B, n_kv_h, T, hs)
-        k = k.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2)
+        k = k.view(B, T, actual_kv_heads, C // actual_nheads).transpose(1, 2)
         # shape: (B, n_kv_h, T, hs)
-        v = v.view(B, T, self.config.effective_n_kv_heads, C // self.config.n_heads).transpose(1, 2)
+        v = v.view(B, T, actual_kv_heads, C // actual_nheads).transpose(1, 2)
 
         if layer_past is not None: 
             past_key, past_value = layer_past
@@ -1550,10 +1593,20 @@ class LLaDAModelLM(PreTrainedModel):
         if not model:
             model_config = create_model_config_from_pretrained_config(config)
             # Initialize model (always on CPU to start with so we don't run out of GPU memory).
-            model_config.init_device = "cpu"
+            model_config.init_device = "cuda"
             self.model = LLaDAModel(model_config, init_params=init_params)
         else:
             self.model = model
+        self._tp_plan = {
+            "transformer.blocks.*.q_proj": "colwise",
+            "transformer.blocks.*.k_proj": "colwise",
+            "transformer.blocks.*.v_proj": "colwise",
+            "transformer.blocks.*.attn_out": "rowwise",
+            "transformer.blocks.*.ff_proj": "colwise",
+            "transformer.blocks.*.up_proj": "colwise",
+            "transformer.blocks.*.ff_out": "rowwise",
+        }
+
 
     def forward(
         self,
@@ -1643,6 +1696,36 @@ class LLaDAModelLM(PreTrainedModel):
     def tie_weights(self):
         if self.config.weight_tying:
             self.model.transformer.ff_out = self.model.transformer.wte
+
+
+    def tensor_parallel(self, tp_size):
+        """
+        Apply the model's tensor parallelization plan.
+        Currently only supports linear layers.
+        """
+        tp_plan = self._tp_plan
+
+        def _tensor_parallel(module: nn.Module, prefix: str = ""):
+            for child_name, child_module in module.named_children():
+                qual_name = maybe_prefix(prefix, child_name)
+                for pattern, style in tp_plan.items():
+                    if re.match(pattern, qual_name) and isinstance(
+                            child_module, nn.Linear):
+                        new_module = replace_linear_class(
+                            child_module, style, None)
+                        new_module.weight_loader(new_module.weight, child_module.weight)
+                        setattr(module, child_name, new_module)
+                        break
+                else:
+                    _tensor_parallel(child_module, prefix=qual_name)
+                if '.blocks.' in qual_name and len(qual_name.split('.'))==3:
+                    child_module.tp_size = tp_size
+                # if qual_name == "transformer.ff_out":
+                #     new_module = ColumnParallelLinear(child_module.in_features, child_module.out_features, False, True, return_bias=False)
+                #     new_module.weight_loader(new_module.weight, child_module.weight)
+                #     setattr(module, child_name, new_module)
+                    
+        _tensor_parallel(self.model)
 
 # Register the model so that it is available for transformer pipelines, auto-loading, etc.
 AutoModel.register(LLaDAConfig, LLaDAModelLM)
