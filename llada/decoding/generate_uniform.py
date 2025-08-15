@@ -207,7 +207,9 @@ class PrefixKVCache:
         self.model = model
         self.past_key_values = []
 
-    def update(self, x, current_block_start):
+    def update(self, x, block_start, block_end):
+        """
+        """
         output = self.model(x, use_cache=True)
         past_key_values = output.past_key_values
 
@@ -215,7 +217,7 @@ class PrefixKVCache:
         for i in range(len(past_key_values)):
             new_past_key_values.append(())
             for j in range(len(past_key_values[i])):
-                new_past_key_values[i] += (past_key_values[i][j][:, :, :current_block_start],)
+                new_past_key_values[i] += (past_key_values[i][j][:, :, :block_start],)
         self.past_key_values = new_past_key_values
         return output
 
@@ -228,11 +230,11 @@ class DualKVCache:
         self.past_key_values = []
         self.replace_position = None
 
-    def update(self, x, current_block_start, current_block_end):
+    def update(self, x, block_start, block_end):
         output = model(x, use_cache=True)
         self.past_key_values = output.past_key_values
         self.replace_position = torch.zeros_like(x, dtype=torch.bool)
-        self.replace_position[:, current_block_start:current_block_end] = 1
+        self.replace_position[:, block_start:block_end] = 1
 
     def get_key_values(self):
         return self.past_key_values, self.replace_position
@@ -272,7 +274,7 @@ class DiffusionLLM:
                 nfe += 1
                 logits = self.model(it.x).logits
                 # TODO(zhengda) is logits 2-D?
-                self.decoder.decode(logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, it.x)
+                self.decoder.decode(logits[:, block_loc.start:block_loc.end, :], block_loc.start, block_loc.end, it.x)
                 i += 1
         return it.x, nfe
 
@@ -309,21 +311,22 @@ class DiffusionLLMWithCache(DiffusionLLM):
             self.decoder.block_init(block, block_id)
 
             # Update KV-cache
-            if kv_cache is not None:
+            if kv_cache is not None and kv_cache.need_update():
                 output = kv_cache.update(it.x, block_loc.start, block_loc.end)
                 # use the generated output to decode.
-                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, it.x)
+                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end, :], block_loc.start, block_loc.end, it.x)
                 nfe += 1
 
             past_key_values, replace_position = kv_cache.get_key_values()
             while (block == mask_id).sum() > 0:
+
                 nfe += 1
                 if kv_cache is None:
-                    logits = model(it.x).logits[:, block_loc.start:block_loc.end]
+                    logits = model(it.x).logits[:, block_loc.start:block_loc.end, :]
                 elif replace_position is None:
                     logits = model(it.x[:, block_loc.start:], past_key_values=past_key_values, use_cache=True).logits
                     block_length = block_loc.end - block_loc.start
-                    logits = logits[:, :block_length]
+                    logits = logits[:, :block_length, :]
                 else:
                     # cache position is the position between current_block_start and current_block_end
                     logits = model(block, past_key_values=past_key_values, use_cache=True,
