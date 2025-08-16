@@ -5,7 +5,7 @@ from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 from model.modeling_llada_origin import LLaDAModelLM
 from decoding.generate_uniform import DiffusionLLM, DiffusionLLMWithCache
-from decoding.generate_fastdllm import generate
+from decoding.generate_fastdllm import generate, generate_with_prefix_cache, generate_with_dual_cache
 from decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory
 from decoding.utils import ThresholdParallelDecoder
 
@@ -45,7 +45,9 @@ def test_diffusion_basic():
     prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
     res = dllm._generate(prompt, gen_length=128, block_length=32)
     res1, nfe = generate(model, prompt, gen_length=128, block_length=32, threshold=0.9)
-    assert torch.all(res == res1[res1 != 126081])
+    res1 = res1[res1 != 126081]
+    assert len(res) == len(res1)
+    assert torch.all(res == res1)
 
 def test_diffusion_cached():
     model_path = "/data/myx/llm/vllm/model/LLaDA-1_5"
@@ -53,13 +55,37 @@ def test_diffusion_cached():
     config.flash_attention = True
     model = LLaDAModelLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.bfloat16, config=config)
     model = model.to('cuda:0')
-
     decoder = ThresholdParallelDecoder(0, threshold=0.9)
-    dllm = DiffusionLLMWithCache(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
+
+    # Test generation without cache.
+    print('Test diffusion LLM without KV-cache')
+    dllm = DiffusionLLMWithCache(model, decoder, BlockIteratorFactory())
     prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
     res = dllm._generate(prompt, gen_length=128, block_length=32)
     res1, nfe = generate(model, prompt, gen_length=128, block_length=32, threshold=0.9)
-    assert torch.all(res == res1[res1 != 126081])
+    res1 = res1[res1 != 126081]
+    assert len(res) == len(res1)
+    assert torch.all(res == res1)
+
+    # Test generation with prefix cache
+    print('Test diffusion LLM with prefix KV-cache')
+    dllm = DiffusionLLMWithCache(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
+    prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
+    res = dllm._generate(prompt, gen_length=128, block_length=32)
+    res1, nfe = generate_with_prefix_cache(model, prompt, gen_length=128, block_length=32, threshold=0.9)
+    res1 = res1[res1 != 126081]
+    assert len(res) == len(res1)
+    assert torch.all(res == res1)
+
+    # Test generation with dual cache
+    print('Test diffusion LLM with dual KV-cache')
+    dllm = DiffusionLLMWithCache(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+    prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
+    res = dllm._generate(prompt, gen_length=128, block_length=32)
+    res1, nfe = generate_with_dual_cache(model, prompt, gen_length=128, block_length=32, threshold=0.9)
+    res1 = res1[res1 != 126081]
+    assert len(res) == len(res1)
+    assert torch.all(res == res1)
 
 logging.basicConfig(level=logging.INFO)
 test_diffusion_cached()

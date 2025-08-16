@@ -362,10 +362,11 @@ class DualKVCache:
         self.replace_position = None
 
     def update(self, x, block_start, block_end):
-        output = model(x, use_cache=True)
+        output = self.model(x, use_cache=True)
         self.past_key_values = output.past_key_values
         self.replace_position = torch.zeros_like(x, dtype=torch.bool)
         self.replace_position[:, block_start:block_end] = 1
+        return output
 
     def get_key_values(self):
         return self.past_key_values, self.replace_position

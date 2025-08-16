@@ -51,7 +51,7 @@ class DiffusionLLM:
             while (block == self.decoder.mask_id).sum() > 0:
                 logits = self.model(x.data).logits
                 # TODO(zhengda) is logits 2-D?
-                self.decoder.decode(logits[:, block_loc.start:block_loc.end, :], block_loc.start, block_loc.end, x)
+                self.decoder.decode(logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
                 nfe += 1
         logger.info(f'The number of diffusion iterations: {nfe}')
         return x.get_generated_tokens()
@@ -65,14 +65,14 @@ class DiffusionLLM:
         return res
 
 class DiffusionLLMWithCache(DiffusionLLM):
-    def __init__(self, model, decoder, iterator_factory, cache_factory):
+    def __init__(self, model, decoder, iterator_factory, cache_factory=None):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
         self.iterator_factory = iterator_factory
 
     @ torch.no_grad()
-    def _generate_with(self, prompt, gen_length=128, block_length=128):
+    def _generate(self, prompt, gen_length=128, block_length=128):
         '''
         Args:
             prompt: A tensor of shape (1, L).
@@ -82,31 +82,33 @@ class DiffusionLLMWithCache(DiffusionLLM):
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 
+        nfe = 0
         kv_cache = self.cache_factory.create(self.model) if self.cache_factory is not None else None
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
 
             # Update KV-cache
-            if kv_cache is not None and kv_cache.need_update():
+            if kv_cache is not None:
                 output = kv_cache.update(x.data, block_loc.start, block_loc.end)
                 # use the generated output to decode.
-                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end, :], block_loc.start, block_loc.end, x)
+                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
+                past_key_values, replace_position = kv_cache.get_key_values()
 
-            past_key_values, replace_position = kv_cache.get_key_values()
-            while (block == mask_id).sum() > 0:
-
+            while (block == self.decoder.mask_id).sum() > 0:
                 if kv_cache is None:
-                    logits = model(x.data).logits[:, block_loc.start:block_loc.end, :]
+                    logits = self.model(x.data).logits[:, block_loc.start:block_loc.end]
                 elif replace_position is None:
-                    logits = model(x[block_loc.start:], past_key_values=past_key_values, use_cache=True).logits
+                    logits = self.model(x[block_loc.start:], past_key_values=past_key_values, use_cache=True).logits
                     block_length = block_loc.end - block_loc.start
-                    logits = logits[:, :block_length, :]
+                    logits = logits[:, :block_length]
                 else:
                     # cache position is the position between current_block_start and current_block_end
-                    logits = model(block, past_key_values=past_key_values, use_cache=True,
-                                   replace_position=replace_position).logits
+                    logits = self.model(block, past_key_values=past_key_values, use_cache=True,
+                                        replace_position=replace_position).logits
                 self.decoder.decode(logits, block_loc.start, block_loc.end, x)
+                nfe += 1
 
+        logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
         return x.get_generated_tokens()
 
 def gather_block_logits(partial_logits, partial_start, partial_end, block_start, block_end):
