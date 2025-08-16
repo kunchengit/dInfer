@@ -118,6 +118,10 @@ class TokenArray:
     def expand(self, new_len):
         pass
 
+    def get_generated_tokens(self):
+        # TODO(zhengda) we need to define the EOS token
+        return self.data[self.data != 126081]
+
     def __getitem__(self, idx):
         return self.data[:, idx]
 
@@ -376,3 +380,15 @@ class DistSPKVCache:
 
     def get_key_values(self):
         pass
+
+class KVCacheFactory:
+    def __init__(self, cache_type):
+        self.cache_type = cache_type
+
+    def create(self, model):
+        if self.cache_type == 'prefix':
+            return PrefixKVCache(model)
+        elif self.cache_type == 'dual':
+            return DualKVCache(model)
+        else:
+            raise ValueError(f'invalid cache type: {self.cache_type}')

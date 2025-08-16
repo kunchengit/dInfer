@@ -1,9 +1,12 @@
+import logging
+
 import torch
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 from model.modeling_llada_origin import LLaDAModelLM
-from decoding.generate_uniform import DiffusionLLM
-from decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory
+from decoding.generate_uniform import DiffusionLLM, DiffusionLLMWithCache
+from decoding.generate_fastdllm import generate
+from decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory
 from decoding.utils import ThresholdParallelDecoder
 
 
@@ -30,7 +33,7 @@ def test_token_array():
     assert torch.all(arr[0:5] == prompt[:, 0:5])
     arr[8:10] = torch.tensor([9, 10]).view(1, 2)
 
-def test():
+def test_diffusion_basic():
     model_path = "/data/myx/llm/vllm/model/LLaDA-1_5"
     config = AutoConfig.from_pretrained(model_path)
     config.flash_attention = True
@@ -40,8 +43,26 @@ def test():
     decoder = ThresholdParallelDecoder(0, threshold=0.9)
     dllm = DiffusionLLM(model, decoder, BlockIteratorFactory())
     prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
-    dllm._generate(prompt, gen_length=128, block_length=32)
+    res = dllm._generate(prompt, gen_length=128, block_length=32)
+    res1, nfe = generate(model, prompt, gen_length=128, block_length=32, threshold=0.9)
+    assert torch.all(res == res1[res1 != 126081])
 
+def test_diffusion_cached():
+    model_path = "/data/myx/llm/vllm/model/LLaDA-1_5"
+    config = AutoConfig.from_pretrained(model_path)
+    config.flash_attention = True
+    model = LLaDAModelLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.bfloat16, config=config)
+    model = model.to('cuda:0')
+
+    decoder = ThresholdParallelDecoder(0, threshold=0.9)
+    dllm = DiffusionLLMWithCache(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
+    prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
+    res = dllm._generate(prompt, gen_length=128, block_length=32)
+    res1, nfe = generate(model, prompt, gen_length=128, block_length=32, threshold=0.9)
+    assert torch.all(res == res1[res1 != 126081])
+
+logging.basicConfig(level=logging.INFO)
+test_diffusion_cached()
+test_diffusion_basic()
 test_token_array()
 test_block_iterator()
-test()

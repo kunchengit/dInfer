@@ -1,7 +1,10 @@
 import torch
 import numpy as np
+import logging
 
 from .utils import TokenArray
+
+logger = logging.getLogger(__name__)
 
 class DiffusionLLM:
     """ Diffusion LLM inference
@@ -42,13 +45,16 @@ class DiffusionLLM:
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 
+        nfe = 0
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
             while (block == self.decoder.mask_id).sum() > 0:
                 logits = self.model(x.data).logits
                 # TODO(zhengda) is logits 2-D?
                 self.decoder.decode(logits[:, block_loc.start:block_loc.end, :], block_loc.start, block_loc.end, x)
-        return x.data
+                nfe += 1
+        logger.info(f'The number of diffusion iterations: {nfe}')
+        return x.get_generated_tokens()
 
     @ torch.no_grad()
     def generate(self, prompts, gen_length=128, block_length=128):
@@ -59,7 +65,7 @@ class DiffusionLLM:
         return res
 
 class DiffusionLLMWithCache(DiffusionLLM):
-    def __init__(self, model, decoder, cache_factory, iterator_factory):
+    def __init__(self, model, decoder, iterator_factory, cache_factory):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
@@ -101,7 +107,7 @@ class DiffusionLLMWithCache(DiffusionLLM):
                                    replace_position=replace_position).logits
                 self.decoder.decode(logits, block_loc.start, block_loc.end, x)
 
-        return x.data
+        return x.get_generated_tokens()
 
 def gather_block_logits(partial_logits, partial_start, partial_end, block_start, block_end):
     # TODO(zhengda)
