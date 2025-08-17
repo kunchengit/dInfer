@@ -126,6 +126,23 @@ class DiffusionLLMWithCache(DiffusionLLM):
         return x.get_generated_tokens()
 
 class DiffusionLLMWithSP(DiffusionLLM):
+    """ Diffusion LLM inference with sequence parallel.
+
+    This class performs diffusion LLM inference with sequence parallel.
+
+    Parameters
+    ----------
+    rank : int
+        The rank of the process
+    world_size : int
+        The number of processes to perform diffusion LLM inference with sequence parallel.
+    model : Torch.Module
+        The diffusion LLM model
+    decoder : ParallelDecoder
+        The decoder that decodes the tokens from the logits computed by the Transformer model
+    iterator_facotry : IteratorFactory
+        The factory class that generates the iterator on the input token array.
+    """
     def __init__(self, rank, world_size, model, decoder, iterator_factory):
         self.model = model
         self.decoder = decoder
@@ -137,7 +154,6 @@ class DiffusionLLMWithSP(DiffusionLLM):
     def _generate(self, prompt, gen_length=128, block_length=128):
         '''
         Args:
-            model: Mask predictor.
             prompt: A tensor of shape (1, L).
             gen_length: Generated answer length.
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
@@ -151,6 +167,7 @@ class DiffusionLLMWithSP(DiffusionLLM):
             self.decoder.block_init(block, block_id)
             while (block == self.decoder.mask_id).sum()>0:
                 part = x.total_length // self.world_size
+                # TODO(zhengda) How does the model collect KV from other processes.
                 partial_logits = self.model(x[(self.rank * part):((self.rank + 1) * part)].clone()).logits
                 op_num += calculate_op_num(x[self.rank*part:(self.rank+1)*part])
 
@@ -159,54 +176,3 @@ class DiffusionLLMWithSP(DiffusionLLM):
                 self.decoder.decode(logits, block_loc.start, block_loc.end, x)
                 nfe += 1
         return x.get_generated_tokens()
-
-class DiffusionLLMWithSPCache(DiffusionLLM):
-    def __init__(self, model, cache_factory, decoder, rank=0, world_size=1):
-        self.model = model
-        self.cache_factory = cache_factory
-        self.decoder = decoder
-        self.rank = rank
-        self.world_size = world_size
-
-    @ torch.no_grad()
-    def _generate(self, prompt, gen_length=128, block_length=128):
-        '''
-        Args:
-            model: Mask predictor.
-            prompt: A tensor of shape (1, L).
-            gen_length: Generated answer length.
-            block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
-        '''
-        op_num = 0
-        it = BlockIterator(prompt, gen_length, block_length, self.decoder.mask_id, self.model.device)
-
-        nfe = 0
-        kv_cache = self.cache_factory.create(self.model)
-        for block_id, (block_loc, block) in enumerate(it):
-            self.decoder.block_init(block, block_id)
-
-            # Update KV-cache
-            partial_output = kv_cache.update(x, block_loc.start, block_loc.end)
-            # use the generated output to decode.
-            logits = gather_block_logits(partial_output.logits, rank * part, (rank + 1) * part, block_loc.start, block_loc.end)
-            self.decoder.decode(logits, block_loc.start, block_loc.end, x)
-            op_num += calculate_op_num(x[:, rank*part:(rank+1)*part])
-
-            nfe += 1
-            while (block == mask_id).sum()>0:
-                nfe += 1
-                # TODO(zhengda) do we have to duplicate the kv-cache?
-                past_key_values = kv_cache.get_past_key_values()
-                new_past_key_values = []
-                for ii in range(len(past_key_values)):
-                    new_past_key_values.append(())
-                    for jj in range(len(past_key_values[ii])):
-                        new_past_key_values[ii] += (past_key_values[ii][jj].clone(),)
-                past_key_values = new_past_key_values
-
-                part = (total_length - block_loc.start) // world_size
-                partial_logits = model(x[:, block_loc.start+rank*part:block_loc.start+(rank+1)*part].clone(), past_key_values=past_key_values, use_cache=True).logits
-                logits = gather_block_logits(partial_output.logits, block_loc.start + rank * part, block_loc.start + (rank + 1) * part, block_loc.start, block_loc.end)
-                op_num += calculate_op_num(x[:, block_loc.start + rank * part:block_loc.start+(rank+1)*part], cache_length=total_length)
-                self.decoder.decode(logits, block_loc.start, block_loc.end, x)
-        return x, nfe

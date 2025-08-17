@@ -293,49 +293,6 @@ class FixedParallelDecoder(ParallelDecoder):
         self.iter += 1
         x[block_start:block_end][transfer_index] = x0[transfer_index]
 
-class DistParallelDecoder(ParallelDecoder):
-    """ This decodes tokens in parallel in a distributed fashion based on a threshold.
-    """
-    def __init__(self, temperature, rank, world_size, remasking='low_confidence', mask_id=126336):
-        super().__init__(temperature, remasking, mask_id)
-        self.rank = rank
-        self.world_size = world_size
-
-    def decode(self, partial_logits, block_start, block_end, x):
-        """ Decode the logits in a block.
-
-        """
-        curr_x = x[(block_start + partial_logits.start_loc):(block_start + partial_logits.end_loc)]
-        mask_index = (curr_x == self.mask_id)
-        x0, transfer_index = get_transfer_index(partial_logits, self.temperature, self.remasking, mask_index, curr_x, None, threshold)
-
-        B, L, V = partial_logits.shape
-        # TODO(zhengda) why is the decoding here different from the one in the while loop?
-        if L * world_size <= 2048:
-            # Each process gets all logits in the block and decode themselves.
-            logits = torch.empty(world_size, B, L, V, device=partial_logits.device, dtype=partial_logits.dtype)
-            dist.all_gather_into_tensor(logits, partial_logits)
-            logits = logits.permute(1, 0, 2, 3).reshape(B, world_size*L, V)
-            mask_index = (x[:, block_start:block_end] == self.mask_id)
-            assert mask_index.shape[1] == logits.shape[1]
-            curr_x = x[:, block_start:block_end]
-            if self.rank == 0:
-                x0, transfer_index = get_transfer_index(logits, self.temperature, self.remasking, mask_index, curr_x, None, self.threshold)
-            x[:, block_start:block_end][transfer_index] = x0[transfer_index]
-        else:
-            # TODO This is a bug. Will be fixed later.
-            assert part > 256
-            # The last one in the cluster decodes tokens and broadcast them to all other GPUs.
-            if rank == world_size - 1:
-                # Why does it only decode [-part:]
-                x0, transfer_index = get_transfer_index(partial_logits, temperature, remasking, mask_index[:, -part:], x[:, -part:], threshold)
-            else:
-                x0 = torch.empty_like(x[:, -part:])
-                transfer_index = torch.empty_like(x[:, -part:], dtype=torch.bool)
-            dist.broadcast(x0, src=world_size-1)
-            dist.broadcast(transfer_index, src=world_size-1)
-            x[:, -part:][transfer_index] = x0[transfer_index]
-
 class PrefixKVCache:
     def __init__(self, model):
         self.model = model
@@ -375,7 +332,7 @@ class DualKVCache:
         return self.past_key_values, self.replace_position
 
 class DistSPKVCache:
-    def __init__(self, model):
+    def __init__(self, rank, world_size, model):
         self.model = model
         self.past_key_values = []
 
