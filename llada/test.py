@@ -1,13 +1,16 @@
+import os
 import logging
+from multiprocessing import Process
 
 import torch
+import torch.distributed as dist
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 from model.modeling_llada_origin import LLaDAModelLM
 from decoding.generate_uniform import DiffusionLLM, DiffusionLLMWithCache
 from decoding.generate_fastdllm import generate, generate_with_prefix_cache, generate_with_dual_cache
 from decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory
-from decoding.utils import ThresholdParallelDecoder
+from decoding.utils import ThresholdParallelDecoder, gather_sequence_block
 
 
 def test_block_iterator():
@@ -97,8 +100,80 @@ def test_diffusion_cached():
     assert len(res) == len(res1)
     assert torch.all(res == res1)
 
-logging.basicConfig(level=logging.INFO)
-test_diffusion_cached()
-test_diffusion_basic()
-test_token_array()
-test_block_iterator()
+def setup_distributed(rank, world_size):
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_PORT'] = '12345'
+    print(f'rank={rank}, world size={world_size}')
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+
+def test_worker(rank, world_size, gpu):
+    setup_distributed(rank, world_size)
+    torch.cuda.set_device(gpu)
+    device = torch.device(gpu)
+    full_data = torch.arange(100).view(4, 25).to(device)
+
+    # Partition size is smaller than block size.
+    block_size = 6
+    part_size = 4
+    first_part_start = 1
+    last_part_end = first_part_start + part_size * world_size
+    assert last_part_end <= full_data.shape[1]
+    partial_start = first_part_start + part_size * rank
+    partial_end = partial_start + part_size
+    part_data = full_data[:, partial_start:partial_end]
+    # The accessed block must be covered by all parts.
+    for block_start in range(first_part_start, last_part_end - block_size):
+        block_end = block_start + block_size
+        block_data = gather_sequence_block(part_data, partial_start, partial_end, block_start, block_end, rank, world_size)
+        assert torch.all(block_data == full_data[:, block_start:block_end])
+
+    # Partition size is larger than block size.
+    block_size = 4
+    part_size = 6
+    first_part_start = 1
+    last_part_end = first_part_start + part_size * world_size
+    assert last_part_end <= full_data.shape[1]
+    partial_start = first_part_start + part_size * rank
+    partial_end = partial_start + part_size
+    part_data = full_data[:, partial_start:partial_end]
+    # The accessed block must be covered by all parts.
+    for block_start in range(first_part_start, last_part_end - block_size):
+        block_end = block_start + block_size
+        block_data = gather_sequence_block(part_data, partial_start, partial_end, block_start, block_end, rank, world_size)
+        assert torch.all(block_data == full_data[:, block_start:block_end])
+
+    # Partition size is equal to block size.
+    block_size = 4
+    part_size = 4
+    first_part_start = 1
+    last_part_end = first_part_start + part_size * world_size
+    assert last_part_end <= full_data.shape[1]
+    partial_start = first_part_start + part_size * rank
+    partial_end = partial_start + part_size
+    part_data = full_data[:, partial_start:partial_end]
+    # The accessed block must be covered by all parts.
+    for block_start in range(first_part_start, last_part_end - block_size):
+        block_end = block_start + block_size
+        block_data = gather_sequence_block(part_data, partial_start, partial_end, block_start, block_end, rank, world_size)
+        assert torch.all(block_data == full_data[:, block_start:block_end])
+
+    dist.destroy_process_group()
+
+def test_dist():
+    torch.multiprocessing.set_start_method('spawn')
+    num_gpus = 4
+    procs = []
+    for i, gpu in enumerate(range(num_gpus)):
+        p = Process(target=test_worker, args=(i, num_gpus, i))
+        procs.append(p)
+        p.start()
+    for p in procs:
+        p.join()
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
+    test_dist()
+    test_diffusion_cached()
+    test_diffusion_basic()
+    test_token_array()
+    test_block_iterator()

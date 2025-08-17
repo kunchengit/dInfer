@@ -1,6 +1,7 @@
 import math
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 def add_gumbel_noise(logits, temperature):
@@ -393,3 +394,38 @@ class KVCacheFactory:
             return DualKVCache(model)
         else:
             raise ValueError(f'invalid cache type: {self.cache_type}')
+
+def gather_sequence_block(partial_data, partial_start, partial_end, block_start, block_end, rank, world_size):
+    """ Gather the wanted block data from the partitioned data.
+
+    Each process contains a partition specified by `partial_start` and `partial_end`.
+    The wanted block is located between `block_start` and `block_end`.
+
+    We want to gather the data within the block range from the partitioned data.
+    """
+    if partial_start >= block_end or partial_end <= block_start:
+        # there is no overlap, nothing is needed from partial_data
+        arr = partial_data[:, 0:0]
+    elif block_start >= partial_start and block_end <= partial_end:
+        # the needed block is within partial_data.
+        arr = partial_data[:, (block_start - partial_start):(block_end - partial_start)]
+    elif block_start <= partial_start and block_end >= partial_end:
+        # the needed partition is within the block.
+        arr = partial_data
+    elif partial_start >= block_start and partial_end >= block_end:
+        # the needed block is overlapped in the front of partial_data
+        arr = partial_data[:, 0:(block_end - partial_start)]
+    else:
+        # the needed block is overlapped at the end of partial_data
+        arr = partial_data[:, (block_start - partial_start):(partial_end - partial_start)]
+    arr = arr.contiguous()
+
+    shape_list = [
+            torch.zeros(len(arr.shape), dtype=torch.int64, device=partial_data.device) for _ in range(world_size)
+    ]
+    dist.all_gather(shape_list, torch.tensor(arr.shape, dtype=torch.int64, device=partial_data.device))
+    part_list = [
+            torch.zeros(*tuple(shape.tolist()), dtype=partial_data.dtype, device=partial_data.device) for shape in shape_list
+    ]
+    dist.all_gather(part_list, arr)
+    return torch.cat(part_list, dim=1)
