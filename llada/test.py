@@ -50,12 +50,22 @@ def test_diffusion_basic():
     assert torch.all(res == res1)
 
 def test_diffusion_cached():
+    torch.cuda.set_device(0)
+    device = torch.device(0)
     model_path = "/data/myx/llm/vllm/model/LLaDA-1_5"
     config = AutoConfig.from_pretrained(model_path)
     config.flash_attention = True
-    model = LLaDAModelLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.bfloat16, config=config)
-    model = model.to('cuda:0')
+    model = LLaDAModelLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, config=config).eval()
+    model = model.to(device)
     decoder = ThresholdParallelDecoder(0, threshold=0.9)
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
+    m = [{"role": "user", "content": prompt}, ]
+    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+    input_ids = tokenizer(prompt)['input_ids']
+    batch_size = 1
+    input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
 
     # Test generation without cache.
     print('Test diffusion LLM without KV-cache')
