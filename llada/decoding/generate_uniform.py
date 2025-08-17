@@ -2,7 +2,8 @@ import torch
 import numpy as np
 import logging
 
-from .utils import TokenArray
+from .utils import TokenArray, DistAlignedTokenArray, gather_sequence_block
+from .utils import calculate_op_num
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,19 @@ class DiffusionLLM:
         return res
 
 class DiffusionLLMWithCache(DiffusionLLM):
+    """ Diffusion LLM with KV-cache
+
+    Parameters
+    ----------
+    model : Torch.Module
+        The LLM model
+    decoder : ParallelDecoder
+        The decoder that decodes the tokens from the logits computed by the Transformer model
+    iterator_facotry : IteratorFactory
+        The factory class that generates the iterator on the input token array.
+    cache_factory : KVCacheFactory (optional)
+        The KV-cache factory that generates a kv-cache for LLM.
+    """
     def __init__(self, model, decoder, iterator_factory, cache_factory=None):
         self.model = model
         self.cache_factory = cache_factory
@@ -111,24 +125,16 @@ class DiffusionLLMWithCache(DiffusionLLM):
         logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
         return x.get_generated_tokens()
 
-def gather_block_logits(partial_logits, partial_start, partial_end, block_start, block_end):
-    # TODO(zhengda)
-    B, L, V = partial_logits.shape
-    logits = torch.empty(world_size, B, L, V, device=partial_logits.device, dtype=partial_logits.dtype)
-    dist.all_gather_into_tensor(logits, partial_logits)
-    return logits.permute(1, 0, 2, 3).reshape(B, world_size*L, V)
-
-
 class DiffusionLLMWithSP(DiffusionLLM):
-    def __init__(self, model, cache_factory, decoder, rank=0, world_size=1):
+    def __init__(self, rank, world_size, model, decoder, iterator_factory):
         self.model = model
-        self.cache_factory = cache_factory
         self.decoder = decoder
+        self.iterator_factory = iterator_factory
         self.rank = rank
         self.world_size = world_size
 
     @ torch.no_grad()
-    def _generate(model, prompt, gen_length=128, block_length=128):
+    def _generate(self, prompt, gen_length=128, block_length=128):
         '''
         Args:
             model: Mask predictor.
@@ -137,19 +143,22 @@ class DiffusionLLMWithSP(DiffusionLLM):
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         '''
         op_num = 0
-        it = BlockIterator(prompt, gen_length, block_length, self.decoder.mask_id, self.model.device)
+        x = DistAlignedTokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device, self.rank, self.world_size)
+        it = self.iterator_factory.create(x, block_length)
 
         nfe = 0
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
-            while (block == mask_id).sum()>0:
-                nfe += 1
-                part = x.shape[1] // world_size
-                partial_logits = model(x[:, (rank * part):((rank + 1) * part)].clone()).logits
-                logits = gather_block_logits(partial_logits, rank * part, (rank + 1) * part, block_loc.start, block_loc.end)
-                op_num += calculate_op_num(x[:, rank*part:(rank+1)*part])
+            while (block == self.decoder.mask_id).sum()>0:
+                part = x.total_length // self.world_size
+                partial_logits = self.model(x[(self.rank * part):((self.rank + 1) * part)].clone()).logits
+                op_num += calculate_op_num(x[self.rank*part:(self.rank+1)*part])
+
+                logits = gather_sequence_block(partial_logits, self.rank * part, (self.rank + 1) * part, block_loc.start, block_loc.end,
+                        self.rank, self.world_size)
                 self.decoder.decode(logits, block_loc.start, block_loc.end, x)
-        return x, nfe
+                nfe += 1
+        return x.get_generated_tokens()
 
 class DiffusionLLMWithSPCache(DiffusionLLM):
     def __init__(self, model, cache_factory, decoder, rank=0, world_size=1):

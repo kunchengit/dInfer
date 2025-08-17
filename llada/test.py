@@ -7,8 +7,9 @@ import torch.distributed as dist
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 from model.modeling_llada_origin import LLaDAModelLM
-from decoding.generate_uniform import DiffusionLLM, DiffusionLLMWithCache
+from decoding.generate_uniform import DiffusionLLM, DiffusionLLMWithCache, DiffusionLLMWithSP
 from decoding.generate_fastdllm import generate, generate_with_prefix_cache, generate_with_dual_cache
+from decoding.generate_dist import generate as generate_sp
 from decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory
 from decoding.utils import ThresholdParallelDecoder, gather_sequence_block
 
@@ -73,9 +74,8 @@ def test_diffusion_cached():
     # Test generation without cache.
     print('Test diffusion LLM without KV-cache')
     dllm = DiffusionLLMWithCache(model, decoder, BlockIteratorFactory())
-    prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
-    res = dllm._generate(prompt, gen_length=128, block_length=32)
-    res1, nfe = generate(model, prompt, gen_length=128, block_length=32, threshold=0.9)
+    res = dllm._generate(input_ids, gen_length=128, block_length=32)
+    res1, nfe = generate(model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
     assert len(res) == len(res1)
     assert torch.all(res == res1)
@@ -83,9 +83,8 @@ def test_diffusion_cached():
     # Test generation with prefix cache
     print('Test diffusion LLM with prefix KV-cache')
     dllm = DiffusionLLMWithCache(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
-    prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
-    res = dllm._generate(prompt, gen_length=128, block_length=32)
-    res1, nfe = generate_with_prefix_cache(model, prompt, gen_length=128, block_length=32, threshold=0.9)
+    res = dllm._generate(input_ids, gen_length=128, block_length=32)
+    res1, nfe = generate_with_prefix_cache(model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
     assert len(res) == len(res1)
     assert torch.all(res == res1)
@@ -93,9 +92,8 @@ def test_diffusion_cached():
     # Test generation with dual cache
     print('Test diffusion LLM with dual KV-cache')
     dllm = DiffusionLLMWithCache(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
-    prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
-    res = dllm._generate(prompt, gen_length=128, block_length=32)
-    res1, nfe = generate_with_dual_cache(model, prompt, gen_length=128, block_length=32, threshold=0.9)
+    res = dllm._generate(input_ids, gen_length=128, block_length=32)
+    res1, nfe = generate_with_dual_cache(model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
     assert len(res) == len(res1)
     assert torch.all(res == res1)
@@ -160,7 +158,6 @@ def test_worker(rank, world_size, gpu):
     dist.destroy_process_group()
 
 def test_dist():
-    torch.multiprocessing.set_start_method('spawn')
     num_gpus = 4
     procs = []
     for i, gpu in enumerate(range(num_gpus)):
@@ -170,10 +167,54 @@ def test_dist():
     for p in procs:
         p.join()
 
+def test_diffusion_worker(rank, world_size, gpu):
+    setup_distributed(rank, world_size)
+    torch.cuda.set_device(gpu)
+    device = torch.device(gpu)
+
+    model_path = "/data/myx/llm/vllm/model/LLaDA-1_5"
+    config = AutoConfig.from_pretrained(model_path)
+    config.flash_attention = True
+    model = LLaDAModelLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, config=config).eval()
+    model = model.to(device)
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
+    m = [{"role": "user", "content": prompt}, ]
+    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+    input_ids = tokenizer(prompt)['input_ids']
+    batch_size = 1
+    input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
+
+    # Test generation without cache.
+    print('Test diffusion LLM without KV-cache')
+    decoder = ThresholdParallelDecoder(0, threshold=0.9)
+    dllm = DiffusionLLMWithSP(rank, world_size, model, decoder, BlockIteratorFactory())
+    res = dllm._generate(input_ids, gen_length=128, block_length=32)
+    res1, nfe = generate_sp(model, input_ids, rank=rank, world_size=world_size, gen_length=128, block_length=32, threshold=0.9)
+    res1 = res1[res1 != 126081]
+    assert len(res) == len(res1)
+    assert torch.all(res == res1)
+
+    dist.destroy_process_group()
+
+def test_diffusion_sp():
+    num_gpus = 4
+    procs = []
+    for i, gpu in enumerate(range(num_gpus)):
+        p = Process(target=test_diffusion_worker, args=(i, num_gpus, i))
+        procs.append(p)
+        p.start()
+    for p in procs:
+        p.join()
+
 if __name__ == '__main__':
+    torch.multiprocessing.set_start_method('spawn')
     logging.basicConfig(level=logging.INFO)
     test_dist()
-    test_diffusion_cached()
-    test_diffusion_basic()
     test_token_array()
     test_block_iterator()
+
+    test_diffusion_cached()
+    test_diffusion_basic()
+    test_diffusion_sp()

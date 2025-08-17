@@ -169,6 +169,10 @@ class DistAlignedTokenArray:
     def device(self):
         return self.data.device
 
+    def get_generated_tokens(self):
+        # TODO(zhengda) we need to define the EOS token
+        return self.data[self.data != 126081]
+
     def expand(self, new_len):
         pass
 
@@ -198,9 +202,7 @@ class BlockIterator:
         The length of the block
     """
     def __init__(self, x, block_length):
-        assert x.gen_length % block_length == 0
         self.x = x
-        self.num_blocks = x.gen_length // block_length
         self.iter = 0
         self.block_length = block_length
 
