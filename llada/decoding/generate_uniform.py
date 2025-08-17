@@ -10,64 +10,6 @@ logger = logging.getLogger(__name__)
 class DiffusionLLM:
     """ Diffusion LLM inference
 
-    This class performs diffusion LLM inference.
-
-    Parameters
-    ----------
-    model : Torch.Module
-        The diffusion LLM model
-    decoder : ParallelDecoder
-        The decoder that decodes the tokens from the logits computed by the Transformer model
-    iterator_facotry : IteratorFactory
-        The factory class that generates the iterator on the input token array.
-    """
-    def __init__(self, model, decoder, iterator_factory):
-        self.model = model
-        self.decoder = decoder
-        self.iterator_factory = iterator_factory
-
-    @ torch.no_grad()
-    def _generate(self, prompt, gen_length=128, block_length=128):
-        ''' Generate tokens with diffusion iterations.
-
-        Parameters:
-        ----------
-        prompt: Torch.Tensor
-            A tensor of shape (1, L) that contains the input prompt.
-        gen_length: int
-            Generated answer length.
-        block_length: int
-            Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
-
-        Returns
-        -------
-        Torch.Tensor: the generated tokens
-        '''
-        x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
-        it = self.iterator_factory.create(x, block_length)
-
-        nfe = 0
-        for block_id, (block_loc, block) in enumerate(it):
-            self.decoder.block_init(block, block_id)
-            while (block == self.decoder.mask_id).sum() > 0:
-                logits = self.model(x.data).logits
-                # TODO(zhengda) is logits 2-D?
-                self.decoder.decode(logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
-                nfe += 1
-        logger.info(f'The number of diffusion iterations: {nfe}')
-        return x.get_generated_tokens()
-
-    @ torch.no_grad()
-    def generate(self, prompts, gen_length=128, block_length=128):
-        res = []
-        for prompt in prompts:
-            x = self._generate(prompt, gen_length, block_length)
-            res.append(x)
-        return res
-
-class DiffusionLLMWithCache(DiffusionLLM):
-    """ Diffusion LLM with KV-cache
-
     Parameters
     ----------
     model : Torch.Module
@@ -87,11 +29,20 @@ class DiffusionLLMWithCache(DiffusionLLM):
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
-        '''
-        Args:
-            prompt: A tensor of shape (1, L).
-            gen_length: Generated answer length.
-            block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
+        ''' Generate tokens with diffusion iterations.
+
+        Parameters:
+        ----------
+        prompt: Torch.Tensor
+            A tensor of shape (1, L) that contains the input prompt.
+        gen_length: int
+            Generated answer length.
+        block_length: int
+            Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
+
+        Returns
+        -------
+        Torch.Tensor: the generated tokens
         '''
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
@@ -124,6 +75,14 @@ class DiffusionLLMWithCache(DiffusionLLM):
 
         logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
         return x.get_generated_tokens()
+
+    @ torch.no_grad()
+    def generate(self, prompts, gen_length=128, block_length=128):
+        res = []
+        for prompt in prompts:
+            x = self._generate(prompt, gen_length, block_length)
+            res.append(x)
+        return res
 
 class DiffusionLLMWithSP(DiffusionLLM):
     """ Diffusion LLM inference with sequence parallel.
