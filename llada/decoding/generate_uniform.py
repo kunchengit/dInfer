@@ -54,9 +54,9 @@ class DiffusionLLM:
 
             # Update KV-cache
             if kv_cache is not None:
-                output = kv_cache.update(x.data, block_loc.start, block_loc.end)
+                logits = kv_cache.update(x.data, block_loc.start, block_loc.end)
                 # use the generated output to decode.
-                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
+                self.decoder.decode(logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
                 past_key_values, replace_position = kv_cache.get_key_values()
 
             while (block == self.decoder.mask_id).sum() > 0:
@@ -78,6 +78,22 @@ class DiffusionLLM:
 
     @ torch.no_grad()
     def generate(self, prompts, gen_length=128, block_length=128):
+        """ Generate tokens with diffusion LLM on a batch of prompts.
+
+        Parameters
+        ----------
+        prompts : torch.Tensor
+            A tensor of shape (b, L) that contains the input prompts.
+        gen_length: int
+            Generated answer length.
+        block_length: int
+            Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
+
+        Returns
+        -------
+        list[Torch.Tensor]: the generated tokens
+
+        """
         res = []
         for prompt in prompts:
             x = self._generate(prompt, gen_length, block_length)
