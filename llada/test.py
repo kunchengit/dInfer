@@ -7,11 +7,11 @@ import torch.distributed as dist
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 from model.modeling_llada_origin import LLaDAModelLM
-from decoding.generate_uniform import BlockWiseDiffusionLLM, BlockWiseDiffusionLLMWithSP
+from decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
 from decoding.generate_fastdllm import generate, generate_with_prefix_cache, generate_with_dual_cache
 from decoding.generate_dist import generate as generate_sp
 from decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory
-from decoding.utils import ThresholdParallelDecoder, gather_sequence_block
+from decoding.utils import ThresholdParallelDecoder, gather_sequence_block, BlockLoc
 
 
 def test_block_iterator():
@@ -37,6 +37,40 @@ def test_token_array():
     assert torch.all(arr[0:5] == prompt[:, 0:5])
     arr[8:10] = torch.tensor([9, 10]).view(1, 2)
 
+class SimulateBlockIterator:
+    """ This class simulates the block iterator in SlidingWindowDiffusionLLM.
+    """
+    def __init__(self, x, block_length, mask_id):
+        self.x = x
+        self.iter = 0
+        self.block_length = block_length
+        self.mask_id = mask_id
+
+    def __iter__(self):
+        self.iter = 0
+        return self
+
+    def move_next(self):
+        current_block_start = self.x.prompt.shape[1] + self.iter * self.block_length
+        current_block_end = current_block_start + self.block_length
+        current_block_end = min(current_block_end, self.x.total_length)
+        # If all tokens have been decoded, move to the next block.
+        if torch.all(self.x[current_block_start:current_block_end] != self.mask_id):
+            self.iter += 1
+
+    def __next__(self):
+        self.move_next()
+        current_block_start = self.x.prompt.shape[1] + self.iter * self.block_length
+        if current_block_start >= self.x.total_length:
+            raise StopIteration
+        current_block_end = current_block_start + self.block_length
+        current_block_end = min(current_block_end, self.x.total_length)
+        return BlockLoc(current_block_start, current_block_end), self.x[current_block_start:current_block_end]
+
+class SimulateBlockIteratorFactory:
+    def create(self, x, block_length):
+        return SimulateBlockIterator(x, block_length, 126336)
+
 def test_diffusion():
     torch.cuda.set_device(0)
     device = torch.device(0)
@@ -55,6 +89,14 @@ def test_diffusion():
     batch_size = 1
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
 
+    print('Test sliding-window diffusion LLM with dual KV-cache')
+    dllm = SlidingWindowDiffusionLLM(model, decoder, SimulateBlockIteratorFactory(), KVCacheFactory('dual'))
+    res = dllm._generate(input_ids, gen_length=128, block_length=32)
+    res1, nfe = generate_with_dual_cache(model, input_ids, gen_length=128, block_length=32, threshold=0.9)
+    res1 = res1[res1 != 126081]
+    assert len(res) == len(res1)
+    assert torch.all(res == res1)
+
     # Test generation without cache.
     print('Test block-wise diffusion LLM without KV-cache')
     dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
@@ -65,7 +107,7 @@ def test_diffusion():
     assert torch.all(res == res1)
 
     # Test generation with prefix cache
-    print('Test diffusion LLM with prefix KV-cache')
+    print('Test block-wise diffusion LLM with prefix KV-cache')
     dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
     res = dllm._generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_with_prefix_cache(model, input_ids, gen_length=128, block_length=32, threshold=0.9)
@@ -74,7 +116,7 @@ def test_diffusion():
     assert torch.all(res == res1)
 
     # Test generation with dual cache
-    print('Test diffusion LLM with dual KV-cache')
+    print('Test block-wise diffusion LLM with dual KV-cache')
     dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
     res = dllm._generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_with_dual_cache(model, input_ids, gen_length=128, block_length=32, threshold=0.9)

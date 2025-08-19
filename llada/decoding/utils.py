@@ -319,6 +319,13 @@ class PrefixKVCache:
         self.block_start = None
         self.block_end = None
 
+    def require_update(self, block_start, block_end):
+        """ require to update the kv-cache.
+
+        We are given the location of the current block that is being decoded.
+        """
+        return self.block_start != block_start or self.block_end != block_end
+
     def update(self, past_key_values, range_start=None, range_end=None):
         """ update the KV-cache
 
@@ -360,6 +367,9 @@ class PrefixKVCache:
         List[List[torch.Tensor]] : the key-values required to decode the specified block.
         torch.Tensor : the tensor indicates the valid locations in the returned key-values.
         """
+        # The key-value cache cannot be empty.
+        assert len(self.past_key_values) > 0
+
         if self.block_past_key_values is not None and self.block_start == block_start and self.block_end == block_end:
             return self.block_past_key_values, None
 
@@ -384,6 +394,13 @@ class DualKVCache:
         self.replace_position = None
         self.block_start = None
         self.block_end = None
+
+    def require_update(self, block_start, block_end):
+        """ require to update the kv-cache.
+
+        We are given the location of the current block that is being decoded.
+        """
+        return self.block_start != block_start or self.block_end != block_end
 
     def update(self, past_key_values, range_start=None, range_end=None):
         """ update the KV-cache
@@ -424,6 +441,9 @@ class DualKVCache:
         List[List[torch.Tensor]] : the key-values required to decode the specified block.
         torch.Tensor : the tensor indicates the valid locations in the returned key-values.
         """
+        # The key-value cache cannot be empty.
+        assert len(self.past_key_values) > 0
+
         if self.replace_position is not None and self.block_start == block_start and self.block_end == block_end:
             return self.past_key_values, self.replace_position
 

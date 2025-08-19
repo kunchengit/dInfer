@@ -116,18 +116,18 @@ class BlockWiseDiffusionLLM:
         logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
         return x.get_generated_tokens()
 
-class SlidingWindowDiffusionLLM:
+class SlidingWindowDiffusionLLM(DiffusionLLM):
     """ This diffusion LLM inference generates tokens in a sliding window manner.
 
     The decoding algorithm defines a window to decode tokens in each diffusion iteration.
     After each iteration, the decoding window may slide forward to cover more masked tokens.
     """
-    def __init__(self, model, decoder, iterator_factory, cache_factory, cache_refresh_freq=10):
+    def __init__(self, model, decoder, iterator_factory, cache_factory, update_kv_with_block=False):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
         self.iterator_factory = iterator_factory
-        self.cache_refresh_freq = cache_refresh_freq
+        self.update_kv_with_block = update_kv_with_block
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
@@ -138,14 +138,16 @@ class SlidingWindowDiffusionLLM:
 
         nfe = 0
         kv_cache = self.cache_factory.create()
+        prev_block_loc = None
         for block_id, (block_loc, block) in enumerate(it):
             # refresh the entire KV-cache
-            if (block_id + 1) % self.cache_refresh_freq == 0:
+            if kv_cache.require_update(block_loc.start, block_loc.end):
                 output = self.model(x.data, use_cache=True)
                 # use the generated output to decode.
                 self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
                 # update the kv-cache
                 kv_cache.update(output.past_key_values)
+                prev_block_loc = block_loc
 
             past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
             # cache position is the position between current_block_start and current_block_end
@@ -153,13 +155,11 @@ class SlidingWindowDiffusionLLM:
             # decode in the current window
             self.decoder.decode(output.logits, block_loc.start, block_loc.end, x)
             # update the kv-cache with the data from the current window.
-            kv_cache.update(output.past_key_values, block_loc.start, block_loc.end)
+            if self.update_kv_with_block:
+                kv_cache.update(output.past_key_values, block_loc.start, block_loc.end)
             nfe += 1
 
             # TODO(zhengda) we need to support the expansion of the sequence.
-
-            if self.decoder.has_terminated(x, block_loc.start, block_loc.end):
-                break
 
         logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
         return x.get_generated_tokens()
