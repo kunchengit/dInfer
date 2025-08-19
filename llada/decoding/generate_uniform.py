@@ -90,16 +90,16 @@ class BlockWiseDiffusionLLM:
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
 
-            # Update KV-cache
-            if kv_cache is not None:
-                output = self.model(x.data, use_cache=True)
-                # use the generated output to decode.
-                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
-                # update KV-cache
-                kv_cache.update(output.past_key_values)
-                past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
-
             while (block == self.decoder.mask_id).sum() > 0:
+                # Update KV-cache
+                if kv_cache is not None and kv_cache.require_update(block_loc.start, block_loc.end):
+                    output = self.model(x.data, use_cache=True)
+                    # use the generated output to decode.
+                    self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
+                    # update KV-cache
+                    kv_cache.update(output.past_key_values)
+                    past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
+
                 if kv_cache is None:
                     logits = self.model(x.data).logits[:, block_loc.start:block_loc.end]
                 elif replace_position is None:
