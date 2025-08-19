@@ -104,8 +104,9 @@ class BlockWiseDiffusionLLM:
 
                 if kv_cache is None:
                     logits = self.model(x.data).logits[:, block_loc.start:block_loc.end]
-                elif replace_position is None:
-                    logits = self.model(x[block_loc.start:], past_key_values=past_key_values, use_cache=True).logits
+                elif kv_cache.cache_type == 'prefix':
+                    logits = self.model(x[block_loc.start:], past_key_values=past_key_values, use_cache=True,
+                                        replace_position=replace_position).logits
                     block_length = block_loc.end - block_loc.start
                     logits = logits[:, :block_length]
                 else:

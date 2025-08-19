@@ -308,105 +308,19 @@ class FixedParallelDecoder(ParallelDecoder):
         self.iter += 1
         x[block_start:block_end][transfer_index] = x0[transfer_index]
 
-class PrefixKVCache:
-    """ Prefix KV-cache
-
-    The KV-cache only caches the KV of the tokens before the block that is being decoded.
-    """
-    def __init__(self, cache_update_freq=None):
-        self.past_key_values = []
-        self.block_past_key_values = None
-        self.block_start = None
-        self.block_end = None
-        self.cache_update_freq = cache_update_freq
-
-    def require_update(self, iter_no, block_start, block_end):
-        """ require to update the kv-cache.
-
-        Parameters
-        ----------
-        iter_no : int
-            The diffusion iteration number
-        block_start : int
-            The start of the block that is being decoded.
-        block_end : int
-            The end of the block that is being decoded.
-        """
-        if self.cache_update_freq is None:
-            return self.block_start != block_start or self.block_end != block_end
-        else:
-            return iter_no % self.cache_update_freq == 0 \
-                    or (self.block_start != block_start or self.block_end != block_end)
-
-    def update(self, past_key_values, range_start=None, range_end=None):
-        """ update the KV-cache
-
-        Parameters
-        ----------
-        past_key_values : list of list of torch.Tensor
-            The key values in all transformer layers.
-        range_start : int
-            The start of the range that is being updated.
-        range_end : int
-            The end of the range that is being updated.
-        """
-        if range_start is None:
-            self.past_key_values = past_key_values
-        else:
-            range_end = range_start + past_key_values[0][0].shape[2] if range_end is None else range_end
-            assert range_end - range_start == past_key_values[0][0].shape[2]
-            assert len(self.past_key_values) > 0 and self.past_key_values[0][0].shape[2] >= range_end
-
-            # copy the new key-values to the kv-cache.
-            for i in range(len(past_key_values)):
-                for j in range(len(past_key_values[i])):
-                    self.past_key_values[i][j][:, :, range_start:range_end] = past_key_values[i][j]
-
-        self.block_past_key_values = None
-
-    def get_key_values(self, block_start, block_end):
-        """ Get the key-values given the block that is being decoded.
-
-        Parameters
-        ----------
-        block_start : int
-            The start of the block that is being decoded.
-        block_end : int
-            The end of the block that is being decoded.
-
-        Returns
-        -------
-        List[List[torch.Tensor]] : the key-values required to decode the specified block.
-        torch.Tensor : the tensor indicates the valid locations in the returned key-values.
-        """
-        # The key-value cache cannot be empty.
-        assert len(self.past_key_values) > 0
-
-        if self.block_past_key_values is not None and self.block_start == block_start and self.block_end == block_end:
-            return self.block_past_key_values, None
-
-        new_past_key_values = []
-        for i in range(len(self.past_key_values)):
-            new_past_key_values.append(())
-            for j in range(len(self.past_key_values[i])):
-                new_past_key_values[i] += (self.past_key_values[i][j][:, :, :block_start],)
-        # TODO(zhengda) does it consume a lot of GPU memory?
-        self.block_past_key_values = new_past_key_values
-        self.block_start = block_start
-        self.block_end = block_end
-        return new_past_key_values, None
-
-class DualKVCache:
-    """ Dual KV-cache
+class KVCache:
+    """ KV-cache
 
     The KV-cache caches the KV of the tokens before and after the block that is being decoded.
     """
-    def __init__(self, cache_update_freq=None):
+    def __init__(self, cache_update_freq=None, cache_type='prefix'):
         self.past_key_values = []
         self.replace_position = None
         self.block_start = None
         self.block_end = None
         self.cache_update_freq = cache_update_freq
+        assert cache_type in ['prefix', 'dual']
+        self.cache_type = cache_type
 
     def require_update(self, iter_no, block_start, block_end):
         """ require to update the kv-cache.
@@ -475,7 +389,10 @@ class DualKVCache:
         length = self.past_key_values[0][0].shape[2]
         batch_size = 1
         self.replace_position = torch.zeros(batch_size, length, dtype=torch.bool, device=self.past_key_values[0][0].device)
-        self.replace_position[:, block_start:block_end] = 1
+        if self.cache_type == 'prefix':
+            self.replace_position[:, block_start:] = 1
+        else:
+            self.replace_position[:, block_start:block_end] = 1
         self.block_start = block_start
         self.block_end = block_end
         return self.past_key_values, self.replace_position
@@ -490,12 +407,7 @@ class KVCacheFactory:
         self.cache_update_freq = cache_update_freq
 
     def create(self):
-        if self.cache_type == 'prefix':
-            return PrefixKVCache(self.cache_update_freq)
-        elif self.cache_type == 'dual':
-            return DualKVCache(self.cache_update_freq)
-        else:
-            raise ValueError(f'invalid cache type: {self.cache_type}')
+        return KVCache(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type)
 
 def gather_sequence_block(partial_data, partial_start, partial_end, block_start, block_end, rank, world_size):
     """ Gather the wanted block data from the partitioned data.
