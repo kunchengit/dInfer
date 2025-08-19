@@ -5,9 +5,12 @@ import numpy as np
 import torch.nn.functional as F
 import os
 from transformers import AutoTokenizer, AutoModel
-from model.modeling_llada import LLaDAModelLM
+
+
 import torch.distributed as dist
-from generate.generate_dist import generate_with_cache, generate_dist, generate_block_cache
+from decoding.generate_dist import generate_dist
+from decoding.generate_fastdllm import generate_fastdllm
+
 import time
 import tqdm
 
@@ -23,10 +26,27 @@ def main(world_size, rank, gpu_id, args):
     print('started', world_size, rank, gpu_id, args)
     torch.cuda.set_device(gpu_id)
     device = torch.device(gpu_id)
-    setup_distributed(rank, world_size)
 
-    model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
-    model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
+    if args.tp:
+        from model.modeling_llada_origin import LLaDAModelLM        
+        model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
+        import vllm
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+        os.environ['MASTER_PORT'] = '23456'        
+        print(vllm.distributed.init_distributed_environment(world_size, rank, 'env://', rank, 'nccl'))
+        vllm.distributed.initialize_model_parallel(world_size, backend='nccl')        
+        if world_size>1:
+            model.tensor_parallel(world_size)
+            
+        model = model.to(torch.bfloat16)
+        model = model.to(device)
+        # model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
+        model.forward = torch.compile(model.forward, fullgraph=True, dynamic=False)
+    else:
+        from model.modeling_llada import LLaDAModelLM
+        setup_distributed(rank, world_size)
+        model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
+        model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     model = model.to(device)
     prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
@@ -46,25 +66,43 @@ def main(world_size, rank, gpu_id, args):
     prompt_shape = input_ids.shape
     # warm up
     for i in range(2):
-        if args.block_diffusion:
-            out, nfe = generate_block_cache(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold)
-        else:
-            if args.cache:
-                out, nfe = generate_with_cache(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold)
+        if args.tp:
+            if args.block_diffusion:
+                out, nfe = generate_fastdllm(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold, use_block=True)
             else:
-                out, nfe = generate_dist(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold)
+                if args.cache:
+                    out, nfe = generate_fastdllm(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold, use_cache=True)
+                else:
+                    out, nfe = generate_fastdllm(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold)        
+        else:
+            if args.block_diffusion:
+                out, nfe = generate_dist(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold, use_block=True)
+            else:
+                if args.cache:
+                    out, nfe = generate_dist(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold, use_cache=True)
+                else:
+                    out, nfe = generate_dist(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold)
     total_shape = out.shape
     
     start = time.time()
     total_forward = 0
     for i in tqdm.trange(num_iter):   
-        if args.block_diffusion:
-            out, nfe = generate_block_cache(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold)
-        else:
-            if args.cache:
-                out, nfe = generate_with_cache(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold)
+        if args.tp:
+            if args.block_diffusion:
+                out, nfe = generate_fastdllm(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold, use_block=True)
             else:
-                out, nfe = generate_dist(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold)
+                if args.cache:
+                    out, nfe = generate_fastdllm(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold, use_cache=True)
+                else:
+                    out, nfe = generate_fastdllm(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold)        
+        else:
+            if args.block_diffusion:
+                out, nfe = generate_dist(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold, use_block=True)
+            else:
+                if args.cache:
+                    out, nfe = generate_dist(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold, use_cache=True)
+                else:
+                    out, nfe = generate_dist(model, input_ids, rank=rank, world_size=world_size, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold)
         total_forward += nfe
     stop = time.time()
     if rank==0:
@@ -92,6 +130,7 @@ if __name__ == '__main__':
     parser.add_argument('--exp_name', type=str, default='exp')
     parser.add_argument('--cache', action='store_true')
     parser.add_argument('--block_diffusion', action='store_true')
+    parser.add_argument('--tp', action='store_true')
     args = parser.parse_args()
     procs = []
     print(args)

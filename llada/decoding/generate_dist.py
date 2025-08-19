@@ -49,28 +49,31 @@ def generate_dist(model, prompt, steps=128, gen_length=128, block_length=128, te
     remasking = kwargs.get('remasking', 'low_confidence') 
     threshold = kwargs.get('threshold', None)
     factor = kwargs.get('factor', None)
+    
+    rank = kwargs.get('rank', dist.get_rank())
+    world_size = kwargs.get('world_size', dist.get_world_size())
 
     if use_block:
-        generated_answer, nfe = generate_block_cache(model, prompt, steps, gen_length, block_length, temperature, remasking, 
+        generated_answer, nfe = generate_block_cache(model, prompt, rank, world_size, steps, gen_length, block_length, temperature, remasking, 
             mask_id, threshold, factor)        
     elif use_cache:
         if dual_cache:
             print('***distributed dual cache not tested!')
-            generated_answer, nfe = generate_with_dual_cache(model, prompt, steps, gen_length, block_length, temperature, remasking, 
+            generated_answer, nfe = generate_with_dual_cache(model, prompt, rank, world_size, steps, gen_length, block_length, temperature, remasking, 
                 mask_id, threshold, factor)
         else:
 
-            generated_answer, nfe = generate_with_cache(model, prompt, steps, gen_length, block_length, temperature, remasking, 
+            generated_answer, nfe = generate_with_cache(model, prompt, rank, world_size, steps, gen_length, block_length, temperature, remasking, 
                 mask_id, threshold, factor)
     else:
-        generated_answer, nfe = generate(model, prompt, steps, gen_length, block_length, temperature, remasking, mask_id, threshold, factor)
+        generated_answer, nfe = generate(model, prompt, rank, world_size, steps, gen_length, block_length, temperature, remasking, mask_id, threshold, factor)
 
     return generated_answer, nfe
 
 
 @ torch.no_grad()
 def generate(model, prompt, rank=0, world_size=1, steps=128, gen_length=128, block_length=128, temperature=0.,
-             remasking='low_confidence', mask_id=126336, threshold=None):
+             remasking='low_confidence', mask_id=126336, threshold=None, factor=None):
     '''
     Args:
         model: Mask predictor.
@@ -142,7 +145,7 @@ def generate(model, prompt, rank=0, world_size=1, steps=128, gen_length=128, blo
 
 @ torch.no_grad()
 def generate_with_cache(model, prompt, rank=0, world_size=1, steps=128, gen_length=128, block_length=128, temperature=0.,
-             remasking='low_confidence', mask_id=126336, threshold=None):
+             remasking='low_confidence', mask_id=126336, threshold=None, factor=None):
     '''
     Args:
         model: Mask predictor.
@@ -269,7 +272,7 @@ def generate_with_cache(model, prompt, rank=0, world_size=1, steps=128, gen_leng
 
 @ torch.no_grad()
 def generate_block_cache(model, prompt, rank=0, world_size=1, steps=128, gen_length=128, block_length=128, temperature=0.,
-             remasking='low_confidence', mask_id=126336, threshold=None):
+             remasking='low_confidence', mask_id=126336, threshold=None, factor=None):
     '''
     Args:
         model: Mask predictor.

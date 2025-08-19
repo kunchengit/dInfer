@@ -20,6 +20,8 @@
 	```
 - A usage case for scripts
 
+- Optional Parameters:
+  - `-l` or `--limit` {int | None} (default: None): 使用多少数据进行测试
 ## Job Submission
 - A usage case for yaml mode:
 	```bash
@@ -31,14 +33,18 @@
 		cd {Fastdllm repo path}/job_submit
 		python llada_eval_job.py --script eval_humaneval.sh --mount {mount_cmd}
 	```
-
+- Optional Parameters:
+  - `--branch` {your branch} (default: Master)
+  - `--app` {your app name} (default: graphhuanan)
+  - `--limit` {int | None} (default: None): 使用多少数据进行测试
+  
 # Decoding Parameters
 ## Fastdllm
 - `decoding`: 'fastdllm'
 - `remasking`: {'low_confidence' | 'random'} (default: 'low_confidence')
 - `use_cache`: boolean (default: False)
 - `threshold`: {float (0 - 1) | None} (default: None)
-- `factor` : {flaot (0 - 1), None} (default: None)
+- `factor` : {flaot (0 - 1) | None} (default: None)
 - `dual_cache`: boolean (default: False)
 
 ## Hierarchy Decoding

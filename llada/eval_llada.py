@@ -19,6 +19,7 @@
 This file is inspired by the code from https://github.com/ML-GSAI/SMDM
 '''
 import accelerate
+from datasets.utils.version import total_ordering
 import torch
 import re
 from pathlib import Path
@@ -146,6 +147,7 @@ class LLaDAEvalHarness(LM):
 
         self.mask_id = mask_id
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self.model_path = model_path
 
         self.mc_num = mc_num
         self.batch_size = int(batch_size)
@@ -158,6 +160,7 @@ class LLaDAEvalHarness(LM):
         self.gen_length = gen_length
         self.block_length = block_length
         self.is_instruct = True if 'instruct' in model_path.lower() else False
+        self.is_lattest = True if '1.5' in model_path else False
         self.save_dir = save_dir
         self.show_speed = show_speed
 
@@ -172,6 +175,16 @@ class LLaDAEvalHarness(LM):
     @property
     def world_size(self):
         return self._world_size
+    
+    @property
+    def tokenizer_name(self) -> str:
+        return self.model_path
+    
+    def apply_chat_template(self, chat_history, **kwargs) -> str:
+        if "tokenize" not in kwargs:
+            kwargs["tokenize"] = False
+        return self.tokenizer.apply_chat_template(chat_history, **kwargs)
+
 
     def _forward_process(self, batch, prompt_index):
         b, l = batch.shape
@@ -309,13 +322,13 @@ class LLaDAEvalHarness(LM):
     
     def generate_until(self, requests):
         output = []
-        num_tokens = 0
-        num_tokens_our = 0
-        num_nfe = 0
+        total_tokens = 0
+        total_tokens_with_eos = 0
+        total_nfe = 0
         processed_count = 0
 
         out_to_file = []
-        forward_calls = 0
+        total_samples = 0
         total_time = 0
         if self.save_dir is not None:
             os.makedirs(self.save_dir, exist_ok=True)
@@ -326,63 +339,72 @@ class LLaDAEvalHarness(LM):
         for i, req in enumerate(tqdm(requests, desc="Generating...")):
             if i < processed_count:
                 continue
-            
-            start_time = time.time()
+            total_samples += 1
             question = req.args[0]
-            if self.is_instruct:
-                m = [{"role": "user", "content": question}]
-                user_input = self.tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
-                input_ids = self.tokenizer(user_input)['input_ids']
-            else:
-                user_input = question
-                input_ids = self.tokenizer(user_input)['input_ids']
+
+            #    print (user_input, "\n**********************")
+                
+            #    input()
+            #    exit(0)
+            #    input_ids = self.tokenizer(user_input)['input_ids']
+            
+            user_input = question
+            input_ids = self.tokenizer(user_input)['input_ids']
 
             stop_tokens = req.args[1]['until']
             input_ids = torch.tensor(input_ids).to(self.device).unsqueeze(0)
-            
+
+            start_time = time.time()
             generated_answer, nfe = self.generate_func(self.model, input_ids, steps=self.steps, gen_length=self.gen_length, block_length=self.block_length, 
                                         temperature=0, mask_id=self.mask_id, decoding = self.decoding, **self.kwargs)
 
-            if self.is_instruct and 'task_id' in req.doc and str(req.doc['task_id']).lower().startswith('humaneval'):
-                if self.show_speed:
-                    num_tokens += (generated_answer != 126081).sum()
-                    num_tokens_our += self.gen_length
-                    num_nfe += nfe
+            # calc statitics
+            if self.show_speed:
+                one_time = time.time() - start_time
+                num_tokens = int((generated_answer != 126081).sum()) - int(input_ids.shape[1])
+                total_tokens += num_tokens
+                total_tokens_with_eos += self.gen_length
+                total_nfe += nfe
+                total_time += one_time
+
+                if self.save_dir is not None and self.log_generated_items:
+                    out_to_file = {'answer':generated_answer,'number_of_forward_call': nfe, 'generated token num': num_tokens,
+                        'tpf_w/o_eos': num_tokens / nfe, 'tpf_with_eos': self.gen_length / nfe, 
+                        'tps_w/o_eos': num_tokens / one_time, 'tps_with_eos': self.gen_length / one_time}
+                    
+                    # 增量保存新生成的答案
+                    with open(save_path, 'a', encoding='utf-8') as f:
+                        f.write(json.dumps(out_to_file, ensure_ascii=False) + '\n')
+                
+
+            if (self.is_instruct or self.is_lattest) and 'task_id' in req.doc and str(req.doc['task_id']).lower().startswith('humaneval'):
+                
                 generated_answer = self.tokenizer.decode(generated_answer[0][input_ids.shape[1]:], skip_special_tokens=True)
             else:
                 generated_answer = self.tokenizer.decode(generated_answer[0][input_ids.shape[1]:], skip_special_tokens=False)
                 for stop_seq in stop_tokens:
                     if stop_seq in generated_answer:
                         generated_answer = generated_answer.split(stop_seq)[0]
-
                 # remove special tokens
                 generated_answer_ids = torch.tensor(self.tokenizer(generated_answer)["input_ids"])
-                if self.show_speed:
-                    num_tokens += (generated_answer_ids != 126081).sum()
-                    num_tokens_our += self.gen_length
-                    num_nfe += nfe
                 generated_answer = self.tokenizer.decode(generated_answer_ids, skip_special_tokens=True)
-            output.append(generated_answer)
             
-            if self.show_speed:
-                one_time = time.time() - start_time
-                total_time += one_time
+            output.append(generated_answer)
 
-                if self.save_dir is not None and self.log_generated_items:
-                    print()
-                    out_to_file = {'answer':generated_answer,'number_of_forward_call': nfe, 'token per second':self.gen_length / one_time}
-                    # 增量保存新生成的答案
-                    with open(save_path, 'a', encoding='utf-8') as f:
-                        f.write(json.dumps(out_to_file, ensure_ascii=False) + '\n')
             if self.accelerator is not None:
                 self.accelerator.wait_for_everyone()
-        # end_time = time.time()
+
+
         if self.show_speed and self.save_dir is not None:
             with open (self.save_dir+f'/rank{self.rank}_afcpt.jsonl', 'w', encoding='utf-8') as file:
                 data={'rank':f'rank{self.rank}',
-                      'average forward calls per token': num_nfe / int(num_tokens),
-                      'tokens per second': int(num_tokens) / total_time,
-                      'tokens per second our': num_tokens_our / total_time}
+                      'average forward calls per token': total_nfe / total_tokens,
+                      'tokens per second': total_tokens / total_time,
+                      'tokens per second our': total_tokens_with_eos / total_time,
+                      'tpf w/o eos': total_tokens / total_nfe,
+                      'tpf with eos': total_tokens_with_eos / total_nfe,
+                      'average generated length': total_tokens / total_samples
+                      }
                 file.write(json.dumps(data, ensure_ascii=False) + '\n')
                 # print(f'average forward calls per token on rank{self.rank}: {forward_calls / num_tokens}')
         return output

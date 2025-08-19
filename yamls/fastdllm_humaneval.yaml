@@ -4,31 +4,34 @@
   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
   steps: 128
   decoding: fastdllm
-  length: 256
+  length: 512
   block_length: 32
+  early_stop: True
   threshold: 0.9
-# fast dllm with cache
-- task: humaneval
-  model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
-  output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
-  steps: 128
-  decoding: fastdllm
-  length: 256
-  block_length: 32
-  threshold: 0.9
-  use_cache: True
-  dual_cache: False
-# hierarchy_remasking
-- task: humaneval
-  model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
-  output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
-  steps: 128
-  decoding: 'hierarchy_remasking'
-  length: 256
-  block_length: 32
-  threshold: 0.9
-  low_threshold: 0.5
-  remask_threshold: 0.35
-  summary_output: 'summary.csv'
+  summary_output:  '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_new_summary.csv'
   show_speed: True
-  log_generated_items: False
+# fast dllm with cache
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: fastdllm
+#   length: 256
+#   block_length: 32
+#   threshold: 0.9
+#   use_cache: True
+#   dual_cache: False
+# # hierarchy_remasking
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'hierarchy_remasking'
+#   length: 256
+#   block_length: 32
+#   threshold: 0.9
+#   low_threshold: 0.5
+#   remask_threshold: 0.35
+#   summary_output: 'summary.csv'
+#   show_speed: True
+#   log_generated_items: False

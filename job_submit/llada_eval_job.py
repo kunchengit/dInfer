@@ -27,6 +27,7 @@ def submit_single_job(script_file, yaml_file, mount_command, **kwargs):
     pod_num = kwargs.get('pod_num', 1)
     max_workers = kwargs.get('max_workers', 8)
     branch = kwargs.get('branch', 'master')
+    limit = kwargs.get('limit', None)
 
     image = kwargs.get("image", "reg.docker.alibaba-inc.com/aii/aistudio:12910142-20250729192318")
     repo_url = kwargs.get("repo_url", "https://code.alipay.com/dulun.dl/Fast-dllm")
@@ -60,7 +61,7 @@ def submit_single_job(script_file, yaml_file, mount_command, **kwargs):
       base_user_command.extend([
         f"mv -f {homedir}/*.yaml {yaml_dir}/ && ",
         f"cd {llada_dir} && ", 
-        f"python eval_llada_yaml.py -y {yaml_file}"])
+        f"python eval_llada_yaml.py -y {yaml_file}" + "" if limit is None else f"-l {limit}"])
     # current dir: /workspace/bin
     full_user_command = "".join(base_user_command)
 
@@ -99,10 +100,14 @@ if __name__ == "__main__":
   parser.add_argument('--yaml', type=str, help='Which yaml you want to use?')
   parser.add_argument('--mount', type=str, required = True, help='mount dllm command')
   parser.add_argument('--branch', type=str, default='master')
+  parser.add_argument('--limit', type=int, default=None)
+  parser.add_argument('--app', type=str, default="graphhuanan")
+
 
   args = parser.parse_args()
 
   if not ((args.script is None) ^ (args.yaml is None)):
     raise TypeError ("Please provide script or yaml parameters")
-  
-  submit_single_job (args.script, args.yaml, args.mount, branch = args.branch)
+
+  submit_single_job (args.script, args.yaml, args.mount, branch = args.branch, limit = args.limit, app_name = args.app)
+

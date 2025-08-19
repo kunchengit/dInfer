@@ -1,51 +1,229 @@
 # hierarchy_remasking
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'hierarchy_remasking'
+#   length: 512
+#   block_length: 32
+#   threshold: 0.88
+#   low_threshold: 0.48
+#   remask_threshold: 0.001
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'hierarchy_remasking'
+#   length: 512
+#   block_length: 32
+#   threshold: 0.88
+#   low_threshold: 0.42
+#   remask_threshold: 0.001
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 512
+#   decoding: 'fastdllm'
+#   length: 512
+#   threshold: 0.9
+#   block_length: 32
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: True
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 512
+#   decoding: 'fastdllm'
+#   length: 512
+#   threshold: 0.92
+#   block_length: 32
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: True
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 512
+#   decoding: 'fastdllm'
+#   length: 512
+#   threshold: 0.98
+#   block_length: 32
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: True
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 512
+#   decoding: 'fastdllm'
+#   length: 512
+#   threshold: 0.96
+#   block_length: 32
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: True
 - task: humaneval
   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
-  steps: 128
-  decoding: 'hierarchy_remasking'
-  length: 256
-  block_length: 32
-  threshold: 0.9
-  low_threshold: 0.5
-  remask_threshold: 0.001
-  summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
-  show_speed: True
-  log_generated_items: False
-- task: humaneval
-  model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
-  output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
-  steps: 128
-  decoding: 'hierarchy_remasking'
-  length: 256
-  block_length: 32
-  threshold: 0.92
-  low_threshold: 0.45
-  remask_threshold: 0.001
-  summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
-  show_speed: True
-  log_generated_items: False
-- task: humaneval
-  model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
-  output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
-  steps: 128
+  steps: 512
   decoding: 'fastdllm'
-  length: 256
+  length: 512
+  threshold: 0.88
   block_length: 32
-  threshold: 0.9
   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
   show_speed: True
-  log_generated_items: False
-- task: humaneval
-  model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
-  output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
-  steps: 128
-  decoding: 'hierarchy_remasking'
-  length: 1024
-  block_length: 256
-  threshold: 0.92
-  low_threshold: 0.45
-  remask_threshold: 0.001
-  summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
-  show_speed: True
-  log_generated_items: False
+  log_generated_items: True
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'hierarchy_remasking'
+#   length: 512
+#   block_length: 32
+#   threshold: 0.88
+#   low_threshold: 0.45
+#   remask_threshold: 0.2
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'hierarchy_remasking'
+#   length: 512
+#   block_length: 32
+#   threshold: 0.88
+#   low_threshold: 0.45
+#   remask_threshold: 0.3
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 512
+#   block_length: 32
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 512
+#   block_length: 64
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 512
+#   block_length: 128
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 512
+#   block_length: 256
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 512
+#   block_length: 512
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 1024
+#   block_length: 32
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 1024
+#   block_length: 64
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 1024
+#   block_length: 128
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 1024
+#   block_length: 256
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 1024
+#   block_length: 512
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
+# - task: humaneval
+#   model_path: '/root/LLaDA-1.5_f695918f7f6432bf'
+#   output_dir: '/mnt/dllm/dulun.dl/dllm/evaluation_res/'
+#   steps: 128
+#   decoding: 'fastdllm'
+#   length: 1024
+#   block_length: 1024
+#   threshold: 0.9
+#   summary_output: '/mnt/dllm/dulun.dl/dllm/evaluation_res/hierarchy/humaneval_summary.csv'
+#   show_speed: True
+#   log_generated_items: False
