@@ -21,11 +21,6 @@ class DiffusionLLM:
     cache_factory : KVCacheFactory (optional)
         The KV-cache factory that generates a kv-cache for LLM.
     """
-    def __init__(self, model, decoder, iterator_factory, cache_factory=None):
-        self.model = model
-        self.cache_factory = cache_factory
-        self.decoder = decoder
-        self.iterator_factory = iterator_factory
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
@@ -44,37 +39,6 @@ class DiffusionLLM:
         -------
         Torch.Tensor: the generated tokens
         '''
-        x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
-        it = self.iterator_factory.create(x, block_length)
-
-        nfe = 0
-        kv_cache = self.cache_factory.create(self.model) if self.cache_factory is not None else None
-        for block_id, (block_loc, block) in enumerate(it):
-            self.decoder.block_init(block, block_id)
-
-            # Update KV-cache
-            if kv_cache is not None:
-                logits = kv_cache.update(x.data, block_loc.start, block_loc.end)
-                # use the generated output to decode.
-                self.decoder.decode(logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
-                past_key_values, replace_position = kv_cache.get_key_values()
-
-            while (block == self.decoder.mask_id).sum() > 0:
-                if kv_cache is None:
-                    logits = self.model(x.data).logits[:, block_loc.start:block_loc.end]
-                elif replace_position is None:
-                    logits = self.model(x[block_loc.start:], past_key_values=past_key_values, use_cache=True).logits
-                    block_length = block_loc.end - block_loc.start
-                    logits = logits[:, :block_length]
-                else:
-                    # cache position is the position between current_block_start and current_block_end
-                    logits = self.model(block, past_key_values=past_key_values, use_cache=True,
-                                        replace_position=replace_position).logits
-                self.decoder.decode(logits, block_loc.start, block_loc.end, x)
-                nfe += 1
-
-        logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
-        return x.get_generated_tokens()
 
     @ torch.no_grad()
     def generate(self, prompts, gen_length=128, block_length=128):
@@ -100,7 +64,108 @@ class DiffusionLLM:
             res.append(x)
         return res
 
-class DiffusionLLMWithSP(DiffusionLLM):
+class BlockWiseDiffusionLLM:
+    """ This diffusion LLM inference generates tokens block by block.
+
+    The decoding algorithm break the generation sequence into blocks.
+    It runs diffusion iterations on the first block and decodes all tokens
+    in the block before moving to the next block.
+    This is a classifical dLLM decoding algorithm.
+    """
+    def __init__(self, model, decoder, iterator_factory, cache_factory=None):
+        self.model = model
+        self.cache_factory = cache_factory
+        self.decoder = decoder
+        self.iterator_factory = iterator_factory
+
+    @ torch.no_grad()
+    def _generate(self, prompt, gen_length=128, block_length=128):
+        ''' Generate tokens with diffusion iterations block by block.
+        '''
+        x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
+        it = self.iterator_factory.create(x, block_length)
+
+        nfe = 0
+        kv_cache = self.cache_factory.create() if self.cache_factory is not None else None
+        for block_id, (block_loc, block) in enumerate(it):
+            self.decoder.block_init(block, block_id)
+
+            # Update KV-cache
+            if kv_cache is not None:
+                output = self.model(x.data, use_cache=True)
+                # use the generated output to decode.
+                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
+                # update KV-cache
+                kv_cache.update(output.past_key_values, block_loc.start, block_loc.end)
+                past_key_values, replace_position = kv_cache.get_key_values()
+
+            while (block == self.decoder.mask_id).sum() > 0:
+                if kv_cache is None:
+                    logits = self.model(x.data).logits[:, block_loc.start:block_loc.end]
+                elif replace_position is None:
+                    logits = self.model(x[block_loc.start:], past_key_values=past_key_values, use_cache=True).logits
+                    block_length = block_loc.end - block_loc.start
+                    logits = logits[:, :block_length]
+                else:
+                    # cache position is the position between current_block_start and current_block_end
+                    logits = self.model(block, past_key_values=past_key_values, use_cache=True,
+                                        replace_position=replace_position).logits
+                self.decoder.decode(logits, block_loc.start, block_loc.end, x)
+                nfe += 1
+
+        logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
+        return x.get_generated_tokens()
+
+class SlidingWindowDiffusionLLM:
+    """ This diffusion LLM inference generates tokens in a sliding window manner.
+
+    The decoding algorithm defines a window to decode tokens in each diffusion iteration.
+    After each iteration, the decoding window may slide forward to cover more masked tokens.
+    """
+    def __init__(self, model, decoder, iterator_factory, cache_factory, cache_refresh_freq=10):
+        self.model = model
+        self.cache_factory = cache_factory
+        self.decoder = decoder
+        self.iterator_factory = iterator_factory
+        self.cache_refresh_freq = cache_refresh_freq
+
+    @ torch.no_grad()
+    def _generate(self, prompt, gen_length=128, block_length=128):
+        ''' Generate tokens with diffusion iterations block by block.
+        '''
+        x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
+        it = self.iterator_factory.create(x, block_length)
+
+        nfe = 0
+        kv_cache = self.cache_factory.create()
+        for block_id, (block_loc, block) in enumerate(it):
+            # refresh the entire KV-cache
+            if (block_id + 1) % self.cache_refresh_freq == 0:
+                output = self.model(x.data, use_cache=True)
+                # use the generated output to decode.
+                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
+                # update the kv-cache
+                kv_cache.update(output.past_key_values, block_loc.start, block_loc.end)
+
+            past_key_values, replace_position = kv_cache.get_key_values()
+            # cache position is the position between current_block_start and current_block_end
+            output = self.model(block, past_key_values=past_key_values, use_cache=True, replace_position=replace_position)
+            # decode in the current window
+            self.decoder.decode(output.logits, block_loc.start, block_loc.end, x)
+            # update the kv-cache with the data from the current window.
+            # TODO(zhengda) i need to enable kv-cache update with the data here.
+            #kv_cache.update(output.past_key_values, block_loc.start, block_loc.end)
+            nfe += 1
+
+            # TODO(zhengda) we need to support the expansion of the sequence.
+
+            if self.decoder.has_terminated(x, block_loc.start, block_loc.end):
+                break
+
+        logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
+        return x.get_generated_tokens()
+
+class BlockWiseDiffusionLLMWithSP(DiffusionLLM):
     """ Diffusion LLM inference with sequence parallel.
 
     This class performs diffusion LLM inference with sequence parallel.

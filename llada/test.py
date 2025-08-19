@@ -7,7 +7,7 @@ import torch.distributed as dist
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 
 from model.modeling_llada_origin import LLaDAModelLM
-from decoding.generate_uniform import DiffusionLLM, DiffusionLLMWithSP
+from decoding.generate_uniform import BlockWiseDiffusionLLM, BlockWiseDiffusionLLMWithSP
 from decoding.generate_fastdllm import generate, generate_with_prefix_cache, generate_with_dual_cache
 from decoding.generate_dist import generate as generate_sp
 from decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory
@@ -56,8 +56,8 @@ def test_diffusion():
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
 
     # Test generation without cache.
-    print('Test diffusion LLM without KV-cache')
-    dllm = DiffusionLLM(model, decoder, BlockIteratorFactory())
+    print('Test block-wise diffusion LLM without KV-cache')
+    dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
     res = dllm._generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate(model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
@@ -66,7 +66,7 @@ def test_diffusion():
 
     # Test generation with prefix cache
     print('Test diffusion LLM with prefix KV-cache')
-    dllm = DiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
+    dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
     res = dllm._generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_with_prefix_cache(model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
@@ -75,7 +75,7 @@ def test_diffusion():
 
     # Test generation with dual cache
     print('Test diffusion LLM with dual KV-cache')
-    dllm = DiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+    dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
     res = dllm._generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_with_dual_cache(model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
@@ -173,7 +173,7 @@ def test_diffusion_worker(rank, world_size, gpu):
     # Test generation without cache.
     print('Test diffusion LLM without KV-cache')
     decoder = ThresholdParallelDecoder(0, threshold=0.9)
-    dllm = DiffusionLLMWithSP(rank, world_size, model, decoder, BlockIteratorFactory())
+    dllm = BlockWiseDiffusionLLMWithSP(rank, world_size, model, decoder, BlockIteratorFactory())
     res = dllm._generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_sp(model, input_ids, rank=rank, world_size=world_size, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]

@@ -312,23 +312,17 @@ class PrefixKVCache:
     """ Prefix KV-cache
 
     The KV-cache only caches the KV of the tokens before the block that is being decoded.
-
-    Parameters
-    ----------
-    model : torch.Module
-        The diffusion LLM model
     """
-    def __init__(self, model):
-        self.model = model
+    def __init__(self):
         self.past_key_values = []
 
-    def update(self, x, block_start, block_end):
+    def update(self, past_key_values, block_start, block_end):
         """ update the KV-cache
 
         Parameters
         ----------
-        x : torch.Tensor
-            The input sequence
+        past_key_values : list of list of torch.Tensor
+            The key values in all transformer layers.
         block_start : int
             The start of the block that is being decoded.
         block_end : int
@@ -338,16 +332,12 @@ class PrefixKVCache:
         -------
         torch.Tensor : the logits computed by the diffusion LLM on the input sequence.
         """
-        output = self.model(x, use_cache=True)
-        past_key_values = output.past_key_values
-
         new_past_key_values = []
         for i in range(len(past_key_values)):
             new_past_key_values.append(())
             for j in range(len(past_key_values[i])):
                 new_past_key_values[i] += (past_key_values[i][j][:, :, :block_start],)
         self.past_key_values = new_past_key_values
-        return output.logits
 
     def get_key_values(self):
         return self.past_key_values, None
@@ -356,24 +346,18 @@ class DualKVCache:
     """ Dual KV-cache
 
     The KV-cache caches the KV of the tokens before and after the block that is being decoded.
-
-    Parameters
-    ----------
-    model : torch.Module
-        The diffusion LLM model.
     """
-    def __init__(self, model):
-        self.model = model
+    def __init__(self):
         self.past_key_values = []
         self.replace_position = None
 
-    def update(self, x, block_start, block_end):
+    def update(self, past_key_values, block_start, block_end):
         """ update the KV-cache
 
         Parameters
         ----------
-        x : torch.Tensor
-            The input sequence
+        past_key_values : list of list of torch.Tensor
+            The key values in all transformer layers.
         block_start : int
             The start of the block that is being decoded.
         block_end : int
@@ -383,11 +367,11 @@ class DualKVCache:
         -------
         torch.Tensor : the logits computed by the diffusion LLM on the input sequence.
         """
-        output = self.model(x, use_cache=True)
-        self.past_key_values = output.past_key_values
-        self.replace_position = torch.zeros_like(x, dtype=torch.bool)
+        self.past_key_values = past_key_values
+        # TODO(zhengda) this is a pretty hacky way to find out the length of the sequence.
+        length = past_key_values[0][0].shape[2]
+        self.replace_position = torch.zeros(1, length, dtype=torch.bool, device=past_key_values[0][0].device)
         self.replace_position[:, block_start:block_end] = 1
-        return output.logits
 
     def get_key_values(self):
         return self.past_key_values, self.replace_position
@@ -400,11 +384,11 @@ class KVCacheFactory:
     def __init__(self, cache_type):
         self.cache_type = cache_type
 
-    def create(self, model):
+    def create(self):
         if self.cache_type == 'prefix':
-            return PrefixKVCache(model)
+            return PrefixKVCache()
         elif self.cache_type == 'dual':
-            return DualKVCache(model)
+            return DualKVCache()
         else:
             raise ValueError(f'invalid cache type: {self.cache_type}')
 
