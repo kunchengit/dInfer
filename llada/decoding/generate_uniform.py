@@ -86,16 +86,18 @@ class BlockWiseDiffusionLLM:
         it = self.iterator_factory.create(x, block_length)
 
         nfe = 0
+        iter_no = 0
         kv_cache = self.cache_factory.create() if self.cache_factory is not None else None
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
 
             while (block == self.decoder.mask_id).sum() > 0:
                 # Update KV-cache
-                if kv_cache is not None and kv_cache.require_update(block_loc.start, block_loc.end):
+                if kv_cache is not None and kv_cache.require_update(iter_no, block_loc.start, block_loc.end):
                     output = self.model(x.data, use_cache=True)
                     # use the generated output to decode.
                     self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
+                    nfe += 1
                     # update KV-cache
                     kv_cache.update(output.past_key_values)
                     past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
@@ -112,6 +114,7 @@ class BlockWiseDiffusionLLM:
                                         replace_position=replace_position).logits
                 self.decoder.decode(logits, block_loc.start, block_loc.end, x)
                 nfe += 1
+                iter_no += 1
 
         logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
         return x.get_generated_tokens()
@@ -138,12 +141,13 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
 
         nfe = 0
         kv_cache = self.cache_factory.create()
-        for iter_id, (window_loc, window) in enumerate(it):
+        for iter_no, (window_loc, window) in enumerate(it):
             # refresh the entire KV-cache
-            if kv_cache.require_update(window_loc.start, window_loc.end):
+            if kv_cache.require_update(iter_no, window_loc.start, window_loc.end):
                 output = self.model(x.data, use_cache=True)
                 # use the generated output to decode.
                 self.decoder.decode(output.logits[:, window_loc.start:window_loc.end], window_loc.start, window_loc.end, x)
+                nfe += 1
                 # update the kv-cache
                 kv_cache.update(output.past_key_values)
 

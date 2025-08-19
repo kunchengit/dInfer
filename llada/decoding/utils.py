@@ -313,18 +313,30 @@ class PrefixKVCache:
 
     The KV-cache only caches the KV of the tokens before the block that is being decoded.
     """
-    def __init__(self):
+    def __init__(self, cache_update_freq=None):
         self.past_key_values = []
         self.block_past_key_values = None
         self.block_start = None
         self.block_end = None
+        self.cache_update_freq = cache_update_freq
 
-    def require_update(self, block_start, block_end):
+    def require_update(self, iter_no, block_start, block_end):
         """ require to update the kv-cache.
 
-        We are given the location of the current block that is being decoded.
+        Parameters
+        ----------
+        iter_no : int
+            The diffusion iteration number
+        block_start : int
+            The start of the block that is being decoded.
+        block_end : int
+            The end of the block that is being decoded.
         """
-        return self.block_start != block_start or self.block_end != block_end
+        if self.cache_update_freq is None:
+            return self.block_start != block_start or self.block_end != block_end
+        else:
+            return iter_no % self.cache_update_freq == 0 \
+                    or (self.block_start != block_start or self.block_end != block_end)
 
     def update(self, past_key_values, range_start=None, range_end=None):
         """ update the KV-cache
@@ -389,18 +401,30 @@ class DualKVCache:
 
     The KV-cache caches the KV of the tokens before and after the block that is being decoded.
     """
-    def __init__(self):
+    def __init__(self, cache_update_freq=None):
         self.past_key_values = []
         self.replace_position = None
         self.block_start = None
         self.block_end = None
+        self.cache_update_freq = cache_update_freq
 
-    def require_update(self, block_start, block_end):
+    def require_update(self, iter_no, block_start, block_end):
         """ require to update the kv-cache.
 
-        We are given the location of the current block that is being decoded.
+        Parameters
+        ----------
+        iter_no : int
+            The diffusion iteration number
+        block_start : int
+            The start of the block that is being decoded.
+        block_end : int
+            The end of the block that is being decoded.
         """
-        return self.block_start != block_start or self.block_end != block_end
+        if self.cache_update_freq is None:
+            return self.block_start != block_start or self.block_end != block_end
+        else:
+            return iter_no % self.cache_update_freq == 0 \
+                    or (self.block_start != block_start or self.block_end != block_end)
 
     def update(self, past_key_values, range_start=None, range_end=None):
         """ update the KV-cache
@@ -461,14 +485,15 @@ class KVCacheFactory:
 
     This class generates KV-cache for the diffusion LLM when it runs diffusion iterations.
     """
-    def __init__(self, cache_type):
+    def __init__(self, cache_type, cache_update_freq=None):
         self.cache_type = cache_type
+        self.cache_update_freq = cache_update_freq
 
     def create(self):
         if self.cache_type == 'prefix':
-            return PrefixKVCache()
+            return PrefixKVCache(self.cache_update_freq)
         elif self.cache_type == 'dual':
-            return DualKVCache()
+            return DualKVCache(self.cache_update_freq)
         else:
             raise ValueError(f'invalid cache type: {self.cache_type}')
 
