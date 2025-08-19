@@ -315,14 +315,41 @@ class PrefixKVCache:
     """
     def __init__(self):
         self.past_key_values = []
+        self.block_past_key_values = None
+        self.block_start = None
+        self.block_end = None
 
-    def update(self, past_key_values, block_start, block_end):
+    def update(self, past_key_values, range_start=None, range_end=None):
         """ update the KV-cache
 
         Parameters
         ----------
         past_key_values : list of list of torch.Tensor
             The key values in all transformer layers.
+        range_start : int
+            The start of the range that is being updated.
+        range_end : int
+            The end of the range that is being updated.
+        """
+        if range_start is None:
+            self.past_key_values = past_key_values
+        else:
+            range_end = range_start + past_key_values[0][0].shape[2] if range_end is None else range_end
+            assert range_end - range_start == past_key_values[0][0].shape[2]
+            assert len(self.past_key_values) > 0 and self.past_key_values[0][0].shape[2] >= range_end
+
+            # copy the new key-values to the kv-cache.
+            for i in range(len(past_key_values)):
+                for j in range(len(past_key_values[i])):
+                    self.past_key_values[i][j][:, :, range_start:range_end] = past_key_values[i][j]
+
+        self.block_past_key_values = None
+
+    def get_key_values(self, block_start, block_end):
+        """ Get the key-values given the block that is being decoded.
+
+        Parameters
+        ----------
         block_start : int
             The start of the block that is being decoded.
         block_end : int
@@ -330,17 +357,22 @@ class PrefixKVCache:
 
         Returns
         -------
-        torch.Tensor : the logits computed by the diffusion LLM on the input sequence.
+        List[List[torch.Tensor]] : the key-values required to decode the specified block.
+        torch.Tensor : the tensor indicates the valid locations in the returned key-values.
         """
-        new_past_key_values = []
-        for i in range(len(past_key_values)):
-            new_past_key_values.append(())
-            for j in range(len(past_key_values[i])):
-                new_past_key_values[i] += (past_key_values[i][j][:, :, :block_start],)
-        self.past_key_values = new_past_key_values
+        if self.block_past_key_values is not None and self.block_start == block_start and self.block_end == block_end:
+            return self.block_past_key_values, None
 
-    def get_key_values(self):
-        return self.past_key_values, None
+        new_past_key_values = []
+        for i in range(len(self.past_key_values)):
+            new_past_key_values.append(())
+            for j in range(len(self.past_key_values[i])):
+                new_past_key_values[i] += (self.past_key_values[i][j][:, :, :block_start],)
+        # TODO(zhengda) does it consume a lot of GPU memory?
+        self.block_past_key_values = new_past_key_values
+        self.block_start = block_start
+        self.block_end = block_end
+        return new_past_key_values, None
 
 class DualKVCache:
     """ Dual KV-cache
@@ -350,14 +382,38 @@ class DualKVCache:
     def __init__(self):
         self.past_key_values = []
         self.replace_position = None
+        self.block_start = None
+        self.block_end = None
 
-    def update(self, past_key_values, block_start, block_end):
+    def update(self, past_key_values, range_start=None, range_end=None):
         """ update the KV-cache
 
         Parameters
         ----------
         past_key_values : list of list of torch.Tensor
             The key values in all transformer layers.
+        range_start : int
+            The start of the range that is being updated.
+        range_end : int
+            The end of the range that is being updated.
+        """
+        if range_start is None:
+            self.past_key_values = past_key_values
+        else:
+            range_end = range_start + past_key_values[0][0].shape[2] if range_end is None else range_end
+            assert range_end - range_start == past_key_values[0][0].shape[2]
+            assert len(self.past_key_values) > 0 and self.past_key_values[0][0].shape[2] >= range_end
+
+            # copy the new key-values to the kv-cache.
+            for i in range(len(past_key_values)):
+                for j in range(len(past_key_values[i])):
+                    self.past_key_values[i][j][:, :, range_start:range_end] = past_key_values[i][j]
+
+    def get_key_values(self, block_start, block_end):
+        """ Get the key-values given the block that is being decoded.
+
+        Parameters
+        ----------
         block_start : int
             The start of the block that is being decoded.
         block_end : int
@@ -365,15 +421,19 @@ class DualKVCache:
 
         Returns
         -------
-        torch.Tensor : the logits computed by the diffusion LLM on the input sequence.
+        List[List[torch.Tensor]] : the key-values required to decode the specified block.
+        torch.Tensor : the tensor indicates the valid locations in the returned key-values.
         """
-        self.past_key_values = past_key_values
-        # TODO(zhengda) this is a pretty hacky way to find out the length of the sequence.
-        length = past_key_values[0][0].shape[2]
-        self.replace_position = torch.zeros(1, length, dtype=torch.bool, device=past_key_values[0][0].device)
-        self.replace_position[:, block_start:block_end] = 1
+        if self.replace_position is not None and self.block_start == block_start and self.block_end == block_end:
+            return self.past_key_values, self.replace_position
 
-    def get_key_values(self):
+        # TODO(zhengda) this is a pretty hacky way to find out the batch size and the length of the sequence.
+        length = self.past_key_values[0][0].shape[2]
+        batch_size = 1
+        self.replace_position = torch.zeros(batch_size, length, dtype=torch.bool, device=self.past_key_values[0][0].device)
+        self.replace_position[:, block_start:block_end] = 1
+        self.block_start = block_start
+        self.block_end = block_end
         return self.past_key_values, self.replace_position
 
 class KVCacheFactory:

@@ -96,8 +96,8 @@ class BlockWiseDiffusionLLM:
                 # use the generated output to decode.
                 self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
                 # update KV-cache
-                kv_cache.update(output.past_key_values, block_loc.start, block_loc.end)
-                past_key_values, replace_position = kv_cache.get_key_values()
+                kv_cache.update(output.past_key_values)
+                past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
 
             while (block == self.decoder.mask_id).sum() > 0:
                 if kv_cache is None:
@@ -145,16 +145,15 @@ class SlidingWindowDiffusionLLM:
                 # use the generated output to decode.
                 self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
                 # update the kv-cache
-                kv_cache.update(output.past_key_values, block_loc.start, block_loc.end)
+                kv_cache.update(output.past_key_values)
 
-            past_key_values, replace_position = kv_cache.get_key_values()
+            past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
             # cache position is the position between current_block_start and current_block_end
             output = self.model(block, past_key_values=past_key_values, use_cache=True, replace_position=replace_position)
             # decode in the current window
             self.decoder.decode(output.logits, block_loc.start, block_loc.end, x)
             # update the kv-cache with the data from the current window.
-            # TODO(zhengda) i need to enable kv-cache update with the data here.
-            #kv_cache.update(output.past_key_values, block_loc.start, block_loc.end)
+            kv_cache.update(output.past_key_values, block_loc.start, block_loc.end)
             nfe += 1
 
             # TODO(zhengda) we need to support the expansion of the sequence.
