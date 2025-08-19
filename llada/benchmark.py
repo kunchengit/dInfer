@@ -77,17 +77,17 @@ def main(world_size, rank, gpu_id, args):
     for i in range(2):
         out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_length)
 
+    prev_forwards = dllm.num_forwards
     total_shape = out.shape
     
     start = time.time()
     for i in tqdm.trange(num_iter):   
         out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_length)
     stop = time.time()
-    total_forward = dllm.num_forwards
+    total_forward = dllm.num_forwards - prev_forwards
     if rank==0:
         print(f'Forward: {total_forward}, Time: {stop-start}, FPS: {total_forward/(stop-start)}, TPS: {batch_size*gen_len*num_iter/(stop-start)}')
-        #for i in range(1):
-        #    print(tokenizer.decode(out[i, input_ids.shape[1]:], skip_special_tokens=False))
+        print(tokenizer.decode(out[input_ids.shape[1]:], skip_special_tokens=False))
     dist.destroy_process_group()
     
 from multiprocessing import Process
