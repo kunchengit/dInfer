@@ -138,25 +138,22 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
 
         nfe = 0
         kv_cache = self.cache_factory.create()
-        prev_block_loc = None
-        for block_id, (block_loc, block) in enumerate(it):
+        for iter_id, (window_loc, window) in enumerate(it):
             # refresh the entire KV-cache
-            if kv_cache.require_update(block_loc.start, block_loc.end):
+            if kv_cache.require_update(window_loc.start, window_loc.end):
                 output = self.model(x.data, use_cache=True)
                 # use the generated output to decode.
-                self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
+                self.decoder.decode(output.logits[:, window_loc.start:window_loc.end], window_loc.start, window_loc.end, x)
                 # update the kv-cache
                 kv_cache.update(output.past_key_values)
-                prev_block_loc = block_loc
 
-            past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
-            # cache position is the position between current_block_start and current_block_end
-            output = self.model(block, past_key_values=past_key_values, use_cache=True, replace_position=replace_position)
+            past_key_values, replace_position = kv_cache.get_key_values(window_loc.start, window_loc.end)
+            output = self.model(window, past_key_values=past_key_values, use_cache=True, replace_position=replace_position)
             # decode in the current window
-            self.decoder.decode(output.logits, block_loc.start, block_loc.end, x)
+            self.decoder.decode(output.logits, window_loc.start, window_loc.end, x)
             # update the kv-cache with the data from the current window.
             if self.update_kv_with_block:
-                kv_cache.update(output.past_key_values, block_loc.start, block_loc.end)
+                kv_cache.update(output.past_key_values, window_loc.start, window_loc.end)
             nfe += 1
 
             # TODO(zhengda) we need to support the expansion of the sequence.
