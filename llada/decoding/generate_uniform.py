@@ -77,6 +77,7 @@ class BlockWiseDiffusionLLM:
         self.cache_factory = cache_factory
         self.decoder = decoder
         self.iterator_factory = iterator_factory
+        self.num_forwards = 0
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
@@ -85,7 +86,6 @@ class BlockWiseDiffusionLLM:
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 
-        nfe = 0
         iter_no = 0
         kv_cache = self.cache_factory.create() if self.cache_factory is not None else None
         for block_id, (block_loc, block) in enumerate(it):
@@ -95,9 +95,9 @@ class BlockWiseDiffusionLLM:
                 # Update KV-cache
                 if kv_cache is not None and kv_cache.require_update(iter_no, block_loc.start, block_loc.end):
                     output = self.model(x.data, use_cache=True)
+                    self.num_forwards += 1
                     # use the generated output to decode.
                     self.decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
-                    nfe += 1
                     # update KV-cache
                     kv_cache.update(output.past_key_values)
                     past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
@@ -113,11 +113,11 @@ class BlockWiseDiffusionLLM:
                     # cache position is the position between current_block_start and current_block_end
                     logits = self.model(block, past_key_values=past_key_values, use_cache=True,
                                         replace_position=replace_position).logits
+                self.num_forwards += 1
                 self.decoder.decode(logits, block_loc.start, block_loc.end, x)
-                nfe += 1
                 iter_no += 1
 
-        logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
+        logger.info(f'The number of diffusion iterations with kv-cache: {self.num_forwards}')
         return x.get_generated_tokens()
 
 class SlidingWindowDiffusionLLM(DiffusionLLM):
@@ -132,6 +132,7 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
         self.decoder = decoder
         self.iterator_factory = iterator_factory
         self.update_kv_with_block = update_kv_with_block
+        self.num_forwards = 0
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
@@ -140,15 +141,14 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 
-        nfe = 0
         kv_cache = self.cache_factory.create()
         for iter_no, (window_loc, window) in enumerate(it):
             # refresh the entire KV-cache
             if kv_cache.require_update(iter_no, window_loc.start, window_loc.end):
                 output = self.model(x.data, use_cache=True)
+                self.num_forwards += 1
                 # use the generated output to decode.
                 self.decoder.decode(output.logits[:, window_loc.start:window_loc.end], window_loc.start, window_loc.end, x)
-                nfe += 1
                 # update the kv-cache
                 kv_cache.update(output.past_key_values)
 
@@ -159,11 +159,11 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
             # update the kv-cache with the data from the current window.
             if self.update_kv_with_block:
                 kv_cache.update(output.past_key_values, window_loc.start, window_loc.end)
-            nfe += 1
+            self.num_forwards += 1
 
             # TODO(zhengda) we need to support the expansion of the sequence.
 
-        logger.info(f'The number of diffusion iterations with kv-cache: {nfe}')
+        logger.info(f'The number of diffusion iterations with kv-cache: {self.num_forwards}')
         return x.get_generated_tokens()
 
 class BlockWiseDiffusionLLMWithSP(DiffusionLLM):
@@ -190,6 +190,7 @@ class BlockWiseDiffusionLLMWithSP(DiffusionLLM):
         self.iterator_factory = iterator_factory
         self.rank = rank
         self.world_size = world_size
+        self.num_forwards = 0
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
@@ -203,7 +204,6 @@ class BlockWiseDiffusionLLMWithSP(DiffusionLLM):
         x = DistAlignedTokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device, self.rank, self.world_size)
         it = self.iterator_factory.create(x, block_length)
 
-        nfe = 0
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
             while (block == self.decoder.mask_id).sum()>0:
@@ -215,5 +215,5 @@ class BlockWiseDiffusionLLMWithSP(DiffusionLLM):
                 logits = gather_sequence_block(partial_logits, self.rank * part, (self.rank + 1) * part, block_loc.start, block_loc.end,
                         self.rank, self.world_size)
                 self.decoder.decode(logits, block_loc.start, block_loc.end, x)
-                nfe += 1
+                self.num_forwards += 1
         return x.get_generated_tokens()
