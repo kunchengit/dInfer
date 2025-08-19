@@ -56,33 +56,76 @@ def calculate_op_num(x, hidden_size=4096, mlp_hidden_size = 12288, vocab_size = 
     op_num = cfg_factor * (num_hidden_layers*layer_ops + x.shape[0]*hidden_size*vocab_size*x.shape[1]*2)
     return op_num/1e12 
 
-
-def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold=None):
+#@torch.compile()
+#@torch.compile(mode='reduce-overhead', fullgraph=False)
+def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold=None, optsoftmax=False, force_length=0, force_strength=0.01, eos_id=126081, eot_id=126348, prior_front=0, minimal_k=1):
+    # t0 = time.time()
     logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+    # print(logits_with_noise.shape, force_length)
+    if force_length>0:
+        valid_force_length = min(force_length, logits_with_noise.shape[1])
+        delta = torch.arange(force_length, force_length-valid_force_length, -1, dtype=logits.dtype, device=logits.device)*0.01
+        logits_with_noise[:, :valid_force_length, eos_id] -=delta
+        logits_with_noise[:, :valid_force_length, eot_id] -=delta
     x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
-
-    if remasking == 'low_confidence':
-        p = F.softmax(logits, dim=-1)
-        x0_p = torch.squeeze(
-            torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
-    elif remasking == 'random':
-        x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+    # t1 = time.time()
+    # mask_index shape: b, l
+    # print(logits[mask_index])
+    if optsoftmax:
+        if remasking == 'low_confidence':
+            p = F.softmax(logits[mask_index], dim=-1).to(logits.dtype)
+            x0_p = torch.squeeze(
+                torch.gather(p, dim=-1, index=torch.unsqueeze(x0[mask_index], -1)), -1) # b, l
+            x0 = torch.where(mask_index, x0, x)
+            confidence = torch.full(x0.shape, -np.inf, device=x0.device, dtype=logits.dtype)
+            # print(confidence.shape, mask_index.shape, x0.shape, x0_p.shape)
+            # print(confidence[mask_index].shape, logits.dtype, x0_p.dtype)
+            confidence[mask_index] = x0_p
+            # x0 = torch.where(mask_index, x0, x)
+            # confidence = torch.where(mask_index, x0_p, -np.inf)
+        elif remasking == 'random':
+            x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+            x0 = torch.where(mask_index, x0, x)
+            confidence = torch.where(mask_index, x0_p, -np.inf)
+        else:
+            raise NotImplementedError(remasking)
     else:
-        raise NotImplementedError(remasking)
+        if remasking == 'low_confidence':
+            p = F.softmax(logits, dim=-1)
+            x0_p = torch.squeeze(
+                torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
+        elif remasking == 'random':
+            x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+        else:
+            raise NotImplementedError(remasking)
+        # print(x.shape, x0.shape, mask_index.shape, logits.shape)
+        x0 = torch.where(mask_index, x0, x)
+        confidence = torch.where(mask_index, x0_p, -np.inf)
+    # t2 = time.time()
 
-    x0 = torch.where(mask_index, x0, x)
-    confidence = torch.where(mask_index, x0_p, -np.inf)
+    if prior_front!=0:
+        confidence += -prior_front+2*prior_front*torch.arange(confidence.shape[1], 0, -1, dtype=confidence.dtype, device=confidence.device)/confidence.shape[1]
 
     transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
     if threshold is not None:
         num_transfer_tokens = mask_index.sum(dim=1, keepdim=True)
-    for j in range(confidence.shape[0]):
-        _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j])
-        transfer_index[j, select_index] = True
-        if threshold is not None:
-            for k in range(1, num_transfer_tokens[j]):
-                if confidence[j, select_index[k]] < threshold:
-                    transfer_index[j, select_index[k]] = False
+    # t3 = time.time()
+    topk = num_transfer_tokens
+    topk_values, topk_indices = torch.topk(confidence, k=topk, dim=1)
+    transfer_index.zero_()  # 全False
+
+    # 向量化写法，将所有top-k标True
+    transfer_index.scatter_(1, topk_indices, True)
+
+    if threshold is not None:
+        # top-1保留，其余top-k且<阈值位置要变False
+        mask = topk_values[:, minimal_k:] < threshold  # shape (B, 3)
+        rows = torch.arange(confidence.size(0), device=mask.device).unsqueeze(1).expand(-1, max(topk-minimal_k, 0))  # shape (B, 3)
+        cols = topk_indices[:, minimal_k:]  # shape (B, 3)
+        # print(rows.shape, cols.shape, topk, minimal_k)
+        # 用mask直接赋值False
+        transfer_index[rows[mask], cols[mask]] = False
+
     return x0, transfer_index
 
 class TokenArray:
