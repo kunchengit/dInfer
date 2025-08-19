@@ -269,9 +269,11 @@ class ThresholdParallelDecoder(ParallelDecoder):
 
     The decoder decodes a token when its confidence score is larger than a threshold.
     """
-    def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336):
+    def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336, early_stop=False):
         super().__init__(temperature, remasking, mask_id)
         self.threshold = threshold
+        self.early_stop = early_stop
+        self.eos_id = 126081
 
     def decode(self, logits, block_start, block_end, x):
         """ Decode the logits in a block.
@@ -282,6 +284,14 @@ class ThresholdParallelDecoder(ParallelDecoder):
         curr_x = x[block_start:block_end]
         x0, transfer_index = get_transfer_index(logits, self.temperature, self.remasking, mask_index, curr_x, None, self.threshold)
         x[block_start:block_end][transfer_index] = x0[transfer_index]
+        # If we want to have early stop and there is an EOS decoded in the current block.
+        # TODO(zhengda) the code below is not well tested in the unit test.
+        if self.early_stop and torch.any(x0 == self.eos_id):
+            # Find the first location of EOS and set all tokens after the location to EOS.
+            # Here we assume that don't perform remasking.
+            # TODO(zhengda) here we assume the batch size is 1.
+            idx = int(torch.nonzero(x0[0] == self.eos_id)[0])
+            x[(block_start + idx):] = self.eos_id
 
 class FixedParallelDecoder(ParallelDecoder):
     """ This decoder decodes tokens in a fixed number of steps.
