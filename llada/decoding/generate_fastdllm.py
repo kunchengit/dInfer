@@ -20,7 +20,7 @@ import numpy as np
 import torch.nn.functional as F
 import os
 from transformers import AutoTokenizer, AutoModel
-from model.modeling_llada_origin import LLaDAModelLM
+from model.modeling_llada_fastdllm import LLaDAModelLM
 from .utils import get_num_transfer_tokens, add_gumbel_noise
 
 
