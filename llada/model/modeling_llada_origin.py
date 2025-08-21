@@ -472,7 +472,7 @@ class RotaryEmbedding(nn.Module):
     def apply_rotary_pos_emb(self, pos_sin: torch.Tensor, pos_cos: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         return ((t * pos_cos) + (self.rotate_half(t) * pos_sin)).to(t.dtype)
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, block_end_index: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, q: torch.Tensor, k: torch.Tensor, block_end_index: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.config.rope_full_precision:
             q_, k_ = q.float(), k.float()
         else:
@@ -491,8 +491,8 @@ class RotaryEmbedding(nn.Module):
                 )
             else:
                 q_ = self.apply_rotary_pos_emb(
-                    pos_sin[:, :, block_end_index.item() - query_len : block_end_index.item(), :],
-                    pos_cos[:, :, block_end_index.item() - query_len : block_end_index.item(), :],
+                    pos_sin[:, :, block_end_index - query_len : block_end_index, :],
+                    pos_cos[:, :, block_end_index - query_len : block_end_index, :],
                     q_,
                 )
             k_ = self.apply_rotary_pos_emb(pos_sin, pos_cos, k_)
@@ -739,7 +739,7 @@ class LLaDABlock(nn.Module):
         attention_bias: Optional[torch.Tensor] = None,
         layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
-        replace_position: Optional[torch.Tensor] = None,
+        replace_position: Optional[Tuple[int, int]] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, T, C = q.size()  # batch size, sequence length, d_model
         dtype = k.dtype
@@ -772,12 +772,11 @@ class LLaDABlock(nn.Module):
                 # past_key shape is [B, n_kv_h, L, hs]
                 # Replace selected_length number of 1s in past_key with k
                 # Get the indices that need to be replaced
-                replace_indices = replace_position.nonzero(as_tuple=True)[1]  # [selected_length]
                 # Use scatter operation to perform replacement
-                past_key[:, :, replace_indices] = k
+                past_key[:, :, replace_position[0]:replace_position[1]] = k
                 k = past_key
                 # Perform the same operation for value
-                past_value[:, :, replace_indices] = v
+                past_value[:, :, replace_position[0]:replace_position[1]] = v
                 v = past_value
 
         present = (k, v) if use_cache else None #present: None
@@ -788,7 +787,7 @@ class LLaDABlock(nn.Module):
             if replace_position is None:
                 q, k = self.rotary_emb(q, k)
             else:
-                q, k = self.rotary_emb(q, k, replace_indices.max()+1)
+                q, k = self.rotary_emb(q, k, replace_position[1])
 
         if attention_bias is not None:
             # Resize and cast attention bias.
@@ -983,7 +982,7 @@ class LLaDALlamaBlock(LLaDABlock):
         attention_bias: Optional[torch.Tensor] = None,
         layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
-        replace_position: Optional[torch.Tensor] = None,
+        replace_position: Optional[Tuple[int, int]] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Get query, key, value projections.
         # shape:
@@ -1002,10 +1001,10 @@ class LLaDALlamaBlock(LLaDABlock):
         # Get attention scores.
         if self._activation_checkpoint_fn is not None:
             att, cache = self._activation_checkpoint_fn(  # type: ignore
-                self.attention, q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position
+                self.attention, q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache, replace_position=replace_position
             )
         else:
-            att, cache = self.attention(q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position)
+            att, cache = self.attention(q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache, replace_position=replace_position)
 
         # Add attention scores.
         # shape: (B, T, C)
@@ -1373,7 +1372,7 @@ class LLaDAModel(nn.Module):
         use_cache: bool = False,
         last_logits_only: bool = False,
         output_hidden_states: Optional[bool] = None,
-        replace_position: Optional[torch.Tensor] = None,
+        replace_position: Optional[Tuple[int, int]] = None,
     ) -> LLaDAOutput:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
@@ -1514,11 +1513,11 @@ class LLaDAModel(nn.Module):
                 ):
                     # shape: (batch_size, seq_len, d_model)
                     x, cache = self._activation_checkpoint_fn(
-                        block, x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position
+                        block, x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache, replace_position=replace_position
                     )
                 else:
                     # shape: (batch_size, seq_len, d_model)
-                    x, cache = block(x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache,replace_position=replace_position)
+                    x, cache = block(x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache, replace_position=replace_position)
                 if attn_key_values is not None:
                     assert cache is not None
                     attn_key_values.append(cache)
@@ -1620,7 +1619,7 @@ class LLaDAModelLM(PreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        replace_position: Optional[torch.Tensor] = None,  # This is a hack mitigation of an issue in transformers `4.39.x`
+        replace_position: Optional[Tuple[int, int]] = None,  # This is a hack mitigation of an issue in transformers `4.39.x`
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if use_cache is None:
             use_cache = self.config.use_cache

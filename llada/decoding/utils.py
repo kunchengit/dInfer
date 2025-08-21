@@ -398,11 +398,10 @@ class KVCache:
         # TODO(zhengda) this is a pretty hacky way to find out the batch size and the length of the sequence.
         length = self.past_key_values[0][0].shape[2]
         batch_size = 1
-        self.replace_position = torch.zeros(batch_size, length, dtype=torch.bool, device=self.past_key_values[0][0].device)
         if self.cache_type == 'prefix':
-            self.replace_position[:, block_start:] = 1
+            self.replace_position = (block_start, length)
         else:
-            self.replace_position[:, block_start:block_end] = 1
+            self.replace_position = (block_start, block_end)
         self.block_start = block_start
         self.block_end = block_end
         return self.past_key_values, self.replace_position
