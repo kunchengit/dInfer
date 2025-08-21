@@ -58,7 +58,9 @@ def calculate_op_num(x, hidden_size=4096, mlp_hidden_size = 12288, vocab_size = 
 
 #@torch.compile()
 #@torch.compile(mode='reduce-overhead', fullgraph=False)
-def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold=None, optsoftmax=False, force_length=0, force_strength=0.01, eos_id=126081, eot_id=126348, prior_front=0, minimal_k=1):
+def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold=None,
+        optsoftmax=False, force_length=0, force_strength=0.01, eos_id=126081, eot_id=126348,
+        prior_front=0, minimal_k=1, use_float64=False):
     # t0 = time.time()
     logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
     # print(logits_with_noise.shape, force_length)
@@ -73,7 +75,10 @@ def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transf
     # print(logits[mask_index])
     if optsoftmax:
         if remasking == 'low_confidence':
-            p = F.softmax(logits[mask_index], dim=-1).to(logits.dtype)
+            if use_float64:
+                p = F.softmax(logits[mask_index].to(torch.float64), dim=-1).to(logits.dtype)
+            else:
+                p = F.softmax(logits[mask_index], dim=-1).to(logits.dtype)
             x0_p = torch.squeeze(
                 torch.gather(p, dim=-1, index=torch.unsqueeze(x0[mask_index], -1)), -1) # b, l
             x0 = torch.where(mask_index, x0, x)
@@ -91,7 +96,10 @@ def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transf
             raise NotImplementedError(remasking)
     else:
         if remasking == 'low_confidence':
-            p = F.softmax(logits, dim=-1)
+            if use_float64:
+                p = F.softmax(logits.to(torch.float64), dim=-1)
+            else:
+                p = F.softmax(logits, dim=-1)
             x0_p = torch.squeeze(
                 torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
         elif remasking == 'random':
@@ -312,11 +320,12 @@ class ThresholdParallelDecoder(ParallelDecoder):
 
     The decoder decodes a token when its confidence score is larger than a threshold.
     """
-    def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336, early_stop=False):
+    def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336, early_stop=False, use_float64=False):
         super().__init__(temperature, remasking, mask_id)
         self.threshold = threshold
         self.early_stop = early_stop
         self.eos_id = 126081
+        self.use_float64 = use_float64
 
     def decode(self, logits, block_start, block_end, x):
         """ Decode the logits in a block.
@@ -325,7 +334,8 @@ class ThresholdParallelDecoder(ParallelDecoder):
         assert mask_index.shape[1] == logits.shape[1]
 
         curr_x = x[block_start:block_end]
-        x0, transfer_index = get_transfer_index(logits, self.temperature, self.remasking, mask_index, curr_x, None, self.threshold)
+        x0, transfer_index = get_transfer_index(logits, self.temperature, self.remasking, mask_index, curr_x, None, self.threshold,
+                use_float64=self.use_float64)
         x[block_start:block_end][transfer_index] = x0[transfer_index]
         # If we want to have early stop and there is an EOS decoded in the current block.
         # TODO(zhengda) the code below is not well tested in the unit test.

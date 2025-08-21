@@ -82,7 +82,7 @@ def test_diffusion():
     model = model.to(device)
     fastdllm_model = LLaDAModelLM_fastdllm.from_pretrained(model_path, torch_dtype=torch.bfloat16, config=config).eval()
     fastdllm_model = fastdllm_model.to(device)
-    decoder = ThresholdParallelDecoder(0, threshold=0.9)
+    decoder = ThresholdParallelDecoder(0, threshold=0.9, use_float64=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
@@ -217,7 +217,7 @@ def test_diffusion_worker(rank, world_size, gpu):
 
     # Test generation without cache.
     print('Test diffusion LLM without KV-cache')
-    decoder = ThresholdParallelDecoder(0, threshold=0.9)
+    decoder = ThresholdParallelDecoder(0, threshold=0.9, use_float64=True)
     dllm = BlockWiseDiffusionLLMWithSP(rank, world_size, model, decoder, BlockIteratorFactory())
     res = dllm._generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_sp(model, input_ids, rank=rank, world_size=world_size, gen_length=128, block_length=32, threshold=0.9)
