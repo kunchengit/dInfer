@@ -57,8 +57,8 @@ def calculate_op_num(x, hidden_size=4096, mlp_hidden_size = 12288, vocab_size = 
     return op_num/1e12 
 
 #@torch.compile()
-@torch.compile(mode='reduce-overhead', fullgraph=True)
-def _get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold,
+#@torch.compile(mode='reduce-overhead', fullgraph=True)
+def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold,
         minimal_k=1, use_float64=False):
     logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
     x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
@@ -77,28 +77,16 @@ def _get_transfer_index(logits, temperature, remasking, mask_index, x, num_trans
     x0 = torch.where(mask_index, x0, x)
     confidence = torch.where(mask_index, x0_p, -np.inf)
 
-    transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
-    # t3 = time.time()
-    topk = num_transfer_tokens
-    topk_values, topk_indices = torch.topk(confidence, k=topk, dim=1)
-    transfer_index.zero_()  # 全False
+    transfer_index = confidence >= threshold
+    # TODO(zhengda) assume the batch size = 1
+    if torch.sum(transfer_index) < num_transfer_tokens:
+        if num_transfer_tokens == 1:
+            transfer_index = torch.argmax(confidence, dim=1)
+        else:
+            topk_values, topk_indices = torch.topk(confidence, k=num_transfer_tokens, dim=1)
+            threshold = topk_values[:, -1]
+            transfer_index = confidence >= threshold
 
-    # 向量化写法，将所有top-k标True
-    transfer_index.scatter_(1, topk_indices, True)
-
-    # top-1保留，其余top-k且<阈值位置要变False
-    mask = topk_values[:, minimal_k:] < threshold  # shape (B, 3)
-    rows = torch.arange(confidence.size(0), device=mask.device).unsqueeze(1).expand(-1, max(topk-minimal_k, 0))  # shape (B, 3)
-    cols = topk_indices[:, minimal_k:]  # shape (B, 3)
-    # 用mask直接赋值False
-
-    return x0, transfer_index, rows, cols, mask
-
-def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold=None,
-        minimal_k=1, use_float64=False):
-    x0, transfer_index, rows, cols, mask = _get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold,
-            minimal_k, use_float64)
-    transfer_index[rows[mask], cols[mask]] = False
     return x0, transfer_index
 
 class TokenArray:
@@ -285,12 +273,14 @@ class ThresholdParallelDecoder(ParallelDecoder):
 
     The decoder decodes a token when its confidence score is larger than a threshold.
     """
-    def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336, early_stop=False, use_float64=False):
+    def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336, early_stop=False, use_float64=False,
+            num_mini_transfer_tokens=1):
         super().__init__(temperature, remasking, mask_id)
         self.threshold = threshold
         self.early_stop = early_stop
         self.eos_id = 126081
         self.use_float64 = use_float64
+        self.num_mini_transfer_tokens = num_mini_transfer_tokens
 
     def decode(self, logits, block_start, block_end, x):
         """ Decode the logits in a block.
@@ -299,10 +289,12 @@ class ThresholdParallelDecoder(ParallelDecoder):
         assert mask_index.shape[1] == logits.shape[1]
 
         curr_x = x[block_start:block_end]
-        num_transfer_tokens = int(mask_index.sum(dim=1, keepdim=True))
-        x0, transfer_index = get_transfer_index(logits, self.temperature, self.remasking, mask_index, curr_x, num_transfer_tokens,
-                self.threshold, use_float64=self.use_float64)
-        x[block_start:block_end][transfer_index] = x0[transfer_index]
+        x0, transfer_index = get_transfer_index(logits, self.temperature, self.remasking, mask_index, curr_x,
+                self.num_mini_transfer_tokens, self.threshold, use_float64=self.use_float64)
+        if transfer_index.dtype == torch.bool:
+            x[block_start:block_end][transfer_index] = x0[transfer_index]
+        else:
+            x[block_start:block_end][:, transfer_index] = x0[:, transfer_index]
         # If we want to have early stop and there is an EOS decoded in the current block.
         # TODO(zhengda) the code below is not well tested in the unit test.
         if self.early_stop and torch.any(x0 == self.eos_id):
