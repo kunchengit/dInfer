@@ -30,19 +30,15 @@ def main(world_size, rank, gpu_id, args):
 
     if args.tp:
         from model.modeling_llada_origin import LLaDAModelLM        
+        setup_distributed(rank, world_size)
         model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
-        import vllm
-        os.environ['MASTER_ADDR'] = '127.0.0.1'
-        os.environ['MASTER_PORT'] = '23456'        
-        print(vllm.distributed.init_distributed_environment(world_size, rank, 'env://', rank, 'nccl'))
-        vllm.distributed.initialize_model_parallel(world_size, backend='nccl')        
         if world_size>1:
-            model.tensor_parallel(world_size)
+            model.tensor_parallel(rank, world_size)
             
         model = model.to(torch.bfloat16)
         model = model.to(device)
-        # model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
-        model.forward = torch.compile(model.forward, fullgraph=True, dynamic=False)
+        model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
+        #model.forward = torch.compile(model.forward, fullgraph=True, dynamic=False)
     else:
         from model.modeling_llada import LLaDAModelLM
         setup_distributed(rank, world_size)

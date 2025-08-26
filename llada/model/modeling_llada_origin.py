@@ -46,7 +46,6 @@ import torch
 import torch.backends.cuda
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
 from torch import einsum
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -72,8 +71,8 @@ else:
     raise SystemExit("This script supports Python 3.8 or higher")
 
 import re
-from vllm.model_executor.models.utils import maybe_prefix
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+
+from .tp_linear import (ColumnParallelLinear,
                         ReplicatedLinear,
                         RowParallelLinear)
 
@@ -97,7 +96,7 @@ __all__ = [
 
 def replace_linear_class(
     linear: nn.Linear, style: Literal["colwise", "rowwise"],
-    quant_config,
+    rank:int=0, world_size:int=1
 ) -> Union[ColumnParallelLinear, RowParallelLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
@@ -123,7 +122,8 @@ def replace_linear_class(
         input_size=linear.in_features,
         output_size=linear.out_features,
         bias=linear.bias is not None,
-        quant_config=quant_config,
+        tp_rank=rank,
+        tp_size=world_size,
         return_bias=False,
     )
 
@@ -1697,7 +1697,7 @@ class LLaDAModelLM(PreTrainedModel):
             self.model.transformer.ff_out = self.model.transformer.wte
 
 
-    def tensor_parallel(self, tp_size):
+    def tensor_parallel(self, tp_rank, tp_size):
         """
         Apply the model's tensor parallelization plan.
         Currently only supports linear layers.
@@ -1706,12 +1706,12 @@ class LLaDAModelLM(PreTrainedModel):
 
         def _tensor_parallel(module: nn.Module, prefix: str = ""):
             for child_name, child_module in module.named_children():
-                qual_name = maybe_prefix(prefix, child_name)
+                qual_name = child_name if prefix == "" else f"{prefix}.{child_name}"
                 for pattern, style in tp_plan.items():
                     if re.match(pattern, qual_name) and isinstance(
                             child_module, nn.Linear):
                         new_module = replace_linear_class(
-                            child_module, style, None)
+                            child_module, style, tp_rank, tp_size)
                         new_module.weight_loader(new_module.weight, child_module.weight)
                         setattr(module, child_name, new_module)
                         break
