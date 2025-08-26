@@ -773,6 +773,8 @@ class LLaDABlock(nn.Module):
                 # Replace selected_length number of 1s in past_key with k
                 # Get the indices that need to be replaced
                 # Use scatter operation to perform replacement
+                past_key = past_key.clone()
+                past_value = past_value.clone()
                 past_key[:, :, replace_position[0]:replace_position[1]] = k
                 k = past_key
                 # Perform the same operation for value

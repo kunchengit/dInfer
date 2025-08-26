@@ -374,7 +374,11 @@ class KVCache:
             The end of the range that is being updated.
         """
         if range_start is None:
-            self.past_key_values = past_key_values
+            self.past_key_values = []
+            for i in range(len(past_key_values)):
+                self.past_key_values.append([])
+                for j in range(len(past_key_values[i])):
+                    self.past_key_values[-1].append(past_key_values[i][j].clone())
         else:
             range_end = range_start + past_key_values[0][0].shape[2] if range_end is None else range_end
             assert range_end - range_start == past_key_values[0][0].shape[2]
