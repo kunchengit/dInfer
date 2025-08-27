@@ -1,5 +1,4 @@
-
-
+import json
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -18,9 +17,43 @@ from decoding.utils import ThresholdParallelDecoder, gather_sequence_block, Bloc
 
 def setup_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '12345'
+    os.environ['MASTER_PORT'] = '12346'
     print(f'rank={rank}, world size={world_size}')
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+
+def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True):
+    device = model.device
+    input_ids = tokenizer(prompt)['input_ids']
+    input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
+    print('prompt len:', input_ids.shape[1], ', total len:', input_ids.shape[1] + gen_len)
+    prompt_shape = input_ids.shape
+
+    decoder = ThresholdParallelDecoder(0, threshold=threshold)
+    if cache == 'prefix':
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
+    elif cache == 'dual':
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+    else:
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
+
+    # warm up
+    if have_warmup:
+        for i in range(2):
+            out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_len)
+
+    prev_forwards = dllm.num_forwards
+    start = time.time()
+    num_tokens = 0
+    for i in tqdm.trange(num_test_iter):
+        out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_len)
+        num_tokens += len(out) - prompt_shape[1]
+    stop = time.time()
+    total_forward = dllm.num_forwards - prev_forwards
+    tps = num_tokens/(stop-start)
+    if rank==0:
+        print(f'Forward: {total_forward}, Time: {stop-start}, FPS: {total_forward/(stop-start)}, TPS: {num_tokens/(stop-start)}')
+        print(tokenizer.decode(out[input_ids.shape[1]:], skip_special_tokens=False))
+    return tps
     
 @ torch.no_grad()
 def main(world_size, rank, gpu_id, args):
@@ -46,46 +79,25 @@ def main(world_size, rank, gpu_id, args):
         model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     model = model.to(device)
-    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
-    m = [{"role": "user", "content": prompt}, ]
-    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
 
-    input_ids = tokenizer(prompt)['input_ids']
-    batch_size = args.batch_size
-    num_iter = args.num_iter
-    #num_parallel = args.num_parallel
-    input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
-    print(input_ids.shape, input_ids.shape[1] + args.gen_len)
-
-    block_length=args.block_length
-    gen_len = args.gen_len
-    prompt_shape = input_ids.shape
-
-    decoder = ThresholdParallelDecoder(0, threshold=args.threshold)
-    if args.cache == 'prefix':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
-    elif args.cache == 'dual':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+    if args.input_data is None:
+        prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
+        m = [{"role": "user", "content": prompt}, ]
+        prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+        benchmark_gen(rank, model, tokenizer, prompt, args.gen_len, args.block_length, args.threshold, args.cache,
+                num_test_iter=args.num_test_iter, have_warmup=True)
     else:
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
+        with open(args.input_data, 'r') as f:
+            # Parsing the JSON file into a Python dictionary
+            data = json.load(f)
+        res_list = []
+        for prompt in data:
+            tps = benchmark_gen(rank, model, tokenizer, prompt, args.gen_len, args.block_length, args.threshold, args.cache,
+                    num_test_iter=args.num_test_iter, have_warmup=True)
+            res_list.append(tps)
+        import statistics
+        print(statistics.mean(res_list))
 
-    # warm up
-    for i in range(2):
-        out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_length)
-
-    prev_forwards = dllm.num_forwards
-    total_shape = out.shape
-    
-    start = time.time()
-    num_tokens = 0
-    for i in tqdm.trange(num_iter):   
-        out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_length)
-        num_tokens += len(out) - prompt_shape[1]
-    stop = time.time()
-    total_forward = dllm.num_forwards - prev_forwards
-    if rank==0:
-        print(f'Forward: {total_forward}, Time: {stop-start}, FPS: {total_forward/(stop-start)}, TPS: {num_tokens/(stop-start)}')
-        print(tokenizer.decode(out[input_ids.shape[1]:], skip_special_tokens=False))
     dist.destroy_process_group()
     
 from multiprocessing import Process
@@ -95,9 +107,10 @@ if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, default='/data/myx/llm/vllm/model/LLaDA-1_5')
+    parser.add_argument('--input_data', type=str, default=None)
     parser.add_argument('--gpu', type=str, default='0')
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--num_iter', type=int, default=4)
+    parser.add_argument('--num_test_iter', type=int, default=2)
     parser.add_argument('--num_parallel', type=int, default=4)
     parser.add_argument('--gen_len', type=int, default=256)
     parser.add_argument('--block_length', type=int, default=64)
