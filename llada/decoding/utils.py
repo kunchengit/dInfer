@@ -215,11 +215,11 @@ class BlockIterator:
         return self
 
     def __next__(self):
-        current_block_start = self.x.prompt.shape[1] + self.iter * self.block_length
+        current_block_start = (self.x.prompt.shape[1] // self.block_length) * self.block_length + self.iter * self.block_length
         if current_block_start >= self.x.total_length:
             raise StopIteration
         current_block_end = current_block_start + self.block_length
-        current_block_end = min(current_block_end, self.x.total_length)
+        assert current_block_end <= self.x.total_length
         self.iter += 1
         return BlockLoc(current_block_start, current_block_end), self.x[current_block_start:current_block_end]
 
