@@ -44,6 +44,7 @@ def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshol
 
     dist.barrier()
     prev_forwards = dllm.num_forwards
+    prev_cache_updates = dllm.cache_updates
     start = time.time()
     num_tokens = 0
     for i in tqdm.trange(num_test_iter):
@@ -52,9 +53,10 @@ def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshol
     stop = time.time()
     dist.barrier()
     total_forward = dllm.num_forwards - prev_forwards
+    total_cache_updates = dllm.cache_updates - prev_cache_updates
     tps = num_tokens/(stop-start)
     if rank==0:
-        print(f'Iter: {i}, Forward: {total_forward}, Time: {stop-start}, FPS: {total_forward/(stop-start)}, TPS: {num_tokens/(stop-start)}')
+        print(f'Iter: {i}, Forward: {total_forward}, cache updates: {total_cache_updates}, Time: {stop-start}, FPS: {total_forward/(stop-start)}, TPS: {num_tokens/(stop-start)}')
         print(tokenizer.decode(out[input_ids.shape[1]:], skip_special_tokens=False))
     return tps
     

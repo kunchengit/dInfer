@@ -78,6 +78,7 @@ class BlockWiseDiffusionLLM:
         self.decoder = decoder
         self.iterator_factory = iterator_factory
         self.num_forwards = 0
+        self.cache_updates = 0
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
@@ -101,6 +102,7 @@ class BlockWiseDiffusionLLM:
                     # update KV-cache
                     kv_cache.update(output.past_key_values)
                     past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
+                    self.cache_updates += 1
 
                 if kv_cache is None:
                     logits = self.model(x.data).logits[:, block_loc.start:block_loc.end]
@@ -133,6 +135,7 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
         self.iterator_factory = iterator_factory
         self.update_kv_with_block = update_kv_with_block
         self.num_forwards = 0
+        self.cache_updates = 0
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
@@ -151,6 +154,7 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
                 self.decoder.decode(output.logits[:, window_loc.start:window_loc.end], window_loc.start, window_loc.end, x)
                 # update the kv-cache
                 kv_cache.update(output.past_key_values)
+                self.cache_updates += 1
 
             past_key_values, replace_position = kv_cache.get_key_values(window_loc.start, window_loc.end)
             output = self.model(window, past_key_values=past_key_values, use_cache=True, replace_position=replace_position)
