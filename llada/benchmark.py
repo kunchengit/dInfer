@@ -49,7 +49,7 @@ def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshol
     num_tokens = 0
     for i in tqdm.trange(num_test_iter):
         out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_len)
-        num_tokens += len(out) - prompt_shape[1]
+        num_tokens += len(out) - input_ids.shape[1]
     stop = time.time()
     dist.barrier()
     total_forward = dllm.num_forwards - prev_forwards
