@@ -737,7 +737,7 @@ class LLaDABlock(nn.Module):
         v: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         attention_bias: Optional[torch.Tensor] = None,
-        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        kv_cache = None,
         use_cache: bool = False,
         replace_position: Optional[Tuple[int, int]] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
@@ -761,25 +761,9 @@ class LLaDABlock(nn.Module):
         # shape: (B, n_kv_h, T, hs)
         v = v.view(B, T, actual_kv_heads, C // actual_nheads).transpose(1, 2)
 
-        if layer_past is not None: 
-            past_key, past_value = layer_past
-            if replace_position is None:
-                k = torch.cat((past_key, k), dim=-2)
-                v = torch.cat((past_value, v), dim=-2)
-            else:
-                # k shape is [B, n_kv_h, selected_length, hs]
-                # replace_position shape is [B, L], where L contains 0s and 1s, 0 means no replacement, 1 means replace, with selected_length number of 1s
-                # past_key shape is [B, n_kv_h, L, hs]
-                # Replace selected_length number of 1s in past_key with k
-                # Get the indices that need to be replaced
-                # Use scatter operation to perform replacement
-                past_key = past_key.clone()
-                past_value = past_value.clone()
-                past_key[:, :, replace_position[0]:replace_position[1]] = k
-                k = past_key
-                # Perform the same operation for value
-                past_value[:, :, replace_position[0]:replace_position[1]] = v
-                v = past_value
+        if kv_cache is not None:
+            k, v = kv_cache.update(k, v, self.layer_id, replace_position)
+            assert use_cache
 
         present = (k, v) if use_cache else None #present: None
         query_len, key_len = q.shape[-2], k.shape[-2]  # could be different if layer_past not None
@@ -823,7 +807,7 @@ class LLaDABlock(nn.Module):
         self,
         x: torch.Tensor,
         attention_bias: Optional[torch.FloatTensor] = None,
-        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        kv_cache = None,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         raise NotImplementedError
@@ -880,7 +864,7 @@ class LLaDASequentialBlock(LLaDABlock):
         self,
         x: torch.Tensor,
         attention_bias: Optional[torch.Tensor] = None,
-        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        kv_cache = None,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Get query, key, value projections.
@@ -898,12 +882,7 @@ class LLaDASequentialBlock(LLaDABlock):
             q, k, v = self.att_proj(self.attn_norm(x)).split(self.fused_dims, dim=-1)
 
         # Get attention scores.
-        if self._activation_checkpoint_fn is not None:
-            att, cache = self._activation_checkpoint_fn(  # type: ignore
-                self.attention, q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache
-            )
-        else:
-            att, cache = self.attention(q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache)
+        att, cache = self.attention(q, k, v, attention_bias, kv_cache=kv_cache, use_cache=use_cache)
 
         # Add attention scores.
         # shape: (B, T, C)
@@ -982,7 +961,7 @@ class LLaDALlamaBlock(LLaDABlock):
         self,
         x: torch.Tensor,
         attention_bias: Optional[torch.Tensor] = None,
-        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        kv_cache = None,
         use_cache: bool = False,
         replace_position: Optional[Tuple[int, int]] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
@@ -1001,12 +980,7 @@ class LLaDALlamaBlock(LLaDABlock):
         # layer_past: None
         # use_cache: False
         # Get attention scores.
-        if self._activation_checkpoint_fn is not None:
-            att, cache = self._activation_checkpoint_fn(  # type: ignore
-                self.attention, q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache, replace_position=replace_position
-            )
-        else:
-            att, cache = self.attention(q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache, replace_position=replace_position)
+        att, cache = self.attention(q, k, v, attention_bias, kv_cache=kv_cache, use_cache=use_cache, replace_position=replace_position)
 
         # Add attention scores.
         # shape: (B, T, C)
@@ -1093,7 +1067,7 @@ class LLaDABlockDiffBlock(LLaDABlock):
         self,
         x: torch.Tensor,
         attention_bias: Optional[torch.Tensor] = None,
-        layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        kv_cache = None,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Get query, key, value projections.
@@ -1109,12 +1083,7 @@ class LLaDABlockDiffBlock(LLaDABlock):
         v = self.v_proj(x_normed)
 
         # Get attention scores.
-        if self._activation_checkpoint_fn is not None:
-            att, cache = self._activation_checkpoint_fn(  # type: ignore
-                self.attention, q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache
-            )
-        else:
-            att, cache = self.attention(q, k, v, attention_bias, layer_past=layer_past, use_cache=use_cache)
+        att, cache = self.attention(q, k, v, attention_bias, kv_cache=kv_cache, use_cache=use_cache)
 
         # Add attention scores.
         # shape: (B, T, C)
@@ -1183,38 +1152,16 @@ class LLaDABlockGroup(nn.ModuleList):
         self,
         x: torch.Tensor,
         attention_bias: Optional[torch.FloatTensor] = None,
-        layers_past: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        kv_cache = None,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[List[Tuple[torch.Tensor, torch.Tensor]]]]:
         attn_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = [] if use_cache else None
         for block_idx, block in enumerate(self):
-            layer_past = None if layers_past is None else layers_past[block_idx]
-            block_idx += self.layer_offset
-            if (
-                (self.activation_checkpointing_strategy == ActivationCheckpointingStrategy.whole_layer)
-                or (
-                    self.activation_checkpointing_strategy == ActivationCheckpointingStrategy.one_in_two
-                    and block_idx % 2 == 0
-                )
-                or (
-                    self.activation_checkpointing_strategy == ActivationCheckpointingStrategy.one_in_three
-                    and block_idx % 3 == 0
-                )
-                or (
-                    self.activation_checkpointing_strategy == ActivationCheckpointingStrategy.one_in_four
-                    and block_idx % 4 == 0
-                )
-            ):
-                # shape: (batch_size, seq_len, d_model)
-                x, cache = self._activation_checkpoint_fn(  # type: ignore
-                    block, x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache
-                )
-            else:
-                # shape: (batch_size, seq_len, d_model)
-                x, cache = block(x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache)
+            # shape: (batch_size, seq_len, d_model)
+            x, cache = block(x, attention_bias=attention_bias, kv_cache=kv_cache, use_cache=use_cache)
             if attn_key_values is not None:
                 assert cache is not None
-                attn_key_values.append(cache)
+                attn_key_values.extend(cache)
         return x, attn_key_values
 
     def reset_parameters(self):
@@ -1370,7 +1317,7 @@ class LLaDAModel(nn.Module):
         input_embeddings: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         attention_bias: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Sequence[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        past_key_values = None,
         use_cache: bool = False,
         last_logits_only: bool = False,
         output_hidden_states: Optional[bool] = None,
@@ -1414,13 +1361,13 @@ class LLaDAModel(nn.Module):
         output_hidden_states = output_hidden_states if output_hidden_states is not None else False
 
         if past_key_values:
-            assert len(past_key_values) == self.config.n_layers
+            assert past_key_values.num_layers == self.config.n_layers
 
         batch_size, seq_len = input_ids.size() if input_embeddings is None else input_embeddings.size()[:2]
         if past_key_values is None:
             past_length = 0
         else:
-            past_length = past_key_values[0][0].size(-2)
+            past_length = past_key_values.seq_len
 
         # Get embeddings of input.
         # shape: (batch_size, seq_len, d_model)
@@ -1474,7 +1421,7 @@ class LLaDAModel(nn.Module):
             if attention_mask is not None:
                 mask_len = attention_mask.shape[-1]
             elif past_key_values is not None:
-                mask_len = past_key_values[0][0].shape[-2] + seq_len
+                mask_len = past_key_values.seq_len + seq_len
             attention_bias = attention_bias[:, :, :mask_len, :mask_len].to(dtype=torch.float)
 
             # Add in the masking bias.
@@ -1485,7 +1432,7 @@ class LLaDAModel(nn.Module):
                 # it can produce NaNs.
                 ensure_finite_(attention_bias, check_neg_inf=True, check_pos_inf=False)
 
-        attn_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = [] if use_cache else None
+        attn_key_values: Optional[List[torch.Tensor, torch.Tensor]] = [] if use_cache else None
 
         # decoder layers
         all_hidden_states = []
@@ -1497,47 +1444,19 @@ class LLaDAModel(nn.Module):
                     # add hidden states
                     all_hidden_states.append(x)
 
-                layer_past = None if past_key_values is None else past_key_values[block_idx]
-                if (
-                    (self.activation_checkpointing_strategy == ActivationCheckpointingStrategy.whole_layer)
-                    or (
-                        self.activation_checkpointing_strategy == ActivationCheckpointingStrategy.one_in_two
-                        and block_idx % 2 == 0
-                    )
-                    or (
-                        self.activation_checkpointing_strategy == ActivationCheckpointingStrategy.one_in_three
-                        and block_idx % 3 == 0
-                    )
-                    or (
-                        self.activation_checkpointing_strategy == ActivationCheckpointingStrategy.one_in_four
-                        and block_idx % 4 == 0
-                    )
-                ):
-                    # shape: (batch_size, seq_len, d_model)
-                    x, cache = self._activation_checkpoint_fn(
-                        block, x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache, replace_position=replace_position
-                    )
-                else:
-                    # shape: (batch_size, seq_len, d_model)
-                    x, cache = block(x, attention_bias=attention_bias, layer_past=layer_past, use_cache=use_cache, replace_position=replace_position)
+                # shape: (batch_size, seq_len, d_model)
+                x, cache = block(x, attention_bias=attention_bias, kv_cache=past_key_values, use_cache=use_cache, replace_position=replace_position)
                 if attn_key_values is not None:
                     assert cache is not None
-                    attn_key_values.append(cache)
+                    attn_key_values.extend(cache)
         else:
             for group_idx, block_group in enumerate(self.transformer.block_groups):
                 if output_hidden_states:
                     # add hidden states
                     all_hidden_states.append(x)
 
-                layers_past = (
-                    None
-                    if past_key_values is None
-                    else past_key_values[
-                        group_idx * self.config.block_group_size : (group_idx + 1) * self.config.block_group_size
-                    ]
-                )
                 x, cache = block_group(
-                    x, attention_bias=attention_bias, layers_past=layers_past, use_cache=use_cache
+                        x, attention_bias=attention_bias, kv_cache=past_key_values, use_cache=use_cache
                 )
                 if attn_key_values is not None:
                     assert cache is not None
@@ -1615,7 +1534,7 @@ class LLaDAModelLM(PreTrainedModel):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         attention_bias: Optional[torch.Tensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -1664,7 +1583,7 @@ class LLaDAModelLM(PreTrainedModel):
         return True
 
     def prepare_inputs_for_generation(
-        self, input_ids: torch.LongTensor, past_key_values: Optional[List[Tuple]] = None, **kwargs
+        self, input_ids: torch.LongTensor, past_key_values = None, **kwargs
     ):
         if past_key_values:
             # This is because we want the model to only process the last generated token.

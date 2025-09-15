@@ -330,13 +330,79 @@ class FixedParallelDecoder(ParallelDecoder):
         x[block_start:block_end][transfer_index] = x0[transfer_index]
 
 class KVCache:
-    """ KV-cache
+    """ The KV-cache
+
+    Parameters
+    ----------
+    past_key_values : List[torch.Tensor]
+        The keys and values of each transformer layer.
+    """
+    def __init__(self, past_key_values):
+        inner_shape = past_key_values[0].shape
+        assert len(past_key_values) % 2 == 0
+        num_layers = len(past_key_values) // 2
+        # The shape is [num_layers, 2, batch_size, num_heads, seq_len, hidden_dim]
+        # TODO(zhengda) we may want to postpone the concatenation to avoid additional data copy for cudagraph.
+        self._data = torch.stack(past_key_values, dim=0).reshape(num_layers, 2, *inner_shape)
+
+    @property
+    def num_layers(self):
+        return self._data.shape[0]
+
+    @property
+    def seq_len(self):
+        return self._data.shape[4]
+
+    def get_keys(self, layer_idx):
+        """ Get the keys of a transformer layer.
+        """
+        return self._data[layer_idx][0]
+
+    def get_values(self, layer_idx):
+        """ Get the values of a transformer layer.
+        """
+        return self._data[layer_idx][1]
+
+    def update(self, key_states, val_states, layer_idx, replace_position=None):
+        """ Update the keys and values of a transformer layer.
+
+        Parameters
+        ----------
+        key_states : torch.Tensor
+            The keys in a block of tokens. The shape is [batch_size, num_heads, seq_len, hidden_dim]
+        val_states : torch.Tensor
+            The values in a block of tokens. The shape is [batch_size, num_heads, seq_len, hidden_dim]
+        layer_idx : int
+            The index of the transformer layer
+        replace_position : Tuple[int]
+            The start and the end position where keys and values should be updated.
+
+        Returns
+        -------
+        torch.Tensor: the new keys for the entire sequence of the transformer layer.
+        torch.Tensor: the new values for the entire sequence of the transformer layer.
+        """
+        # This is dual cache.
+        if replace_position is not None:
+            keys = self.get_keys(layer_idx).slice_scatter(key_states, dim=2, start=replace_position[0], end=replace_position[1])
+            values = self.get_values(layer_idx).slice_scatter(val_states, dim=2, start=replace_position[0], end=replace_position[1])
+        else:
+            # This is prefix cache.
+            keys = torch.cat([self.get_keys(layer_idx), key_states], dim=2)
+            values = torch.cat([self.get_values(layer_idx), val_states], dim=2)
+        return keys, values
+
+class DiffusionKVCacheManager:
+    """ KV-cache for diffusion LLM.
 
     The KV-cache caches the KV of the tokens before and after the block that is being decoded.
+    Because diffusion LLM uses bidirectional attention, the KV-cache has to be updated frequently in the diffusion iterations.
+    This class basically defines the KV-cache update policy in the diffusion iterations. This includes the locations where
+    keys and values can be updated and the frequency of the keys and values can be updated.
+
     """
     def __init__(self, cache_update_freq=None, cache_type='prefix'):
-        self.past_key_values = []
-        self.replace_position = None
+        self.past_key_values = None
         self.block_start = None
         self.block_end = None
         self.cache_update_freq = cache_update_freq
@@ -355,9 +421,14 @@ class KVCache:
         block_end : int
             The end of the block that is being decoded.
         """
+        if self.past_key_values is None:
+            return True
+        # If self.cache_update_freq is not specified, the KV-cache is updated when we enter a new block.
         if self.cache_update_freq is None:
             return self.block_start != block_start or self.block_end != block_end
         else:
+            # Otherwise, we update the KV-cache when we enter a new block or the specified number of
+            # diffusion iterations is reached.
             return iter_no % self.cache_update_freq == 0 \
                     or (self.block_start != block_start or self.block_end != block_end)
 
@@ -366,7 +437,7 @@ class KVCache:
 
         Parameters
         ----------
-        past_key_values : list of list of torch.Tensor
+        past_key_values : List[torch.Tensor]
             The key values in all transformer layers.
         range_start : int
             The start of the range that is being updated.
@@ -374,20 +445,10 @@ class KVCache:
             The end of the range that is being updated.
         """
         if range_start is None:
-            self.past_key_values = []
-            for i in range(len(past_key_values)):
-                self.past_key_values.append([])
-                for j in range(len(past_key_values[i])):
-                    self.past_key_values[-1].append(past_key_values[i][j].clone())
+            self.past_key_values = KVCache(past_key_values)
         else:
-            range_end = range_start + past_key_values[0][0].shape[2] if range_end is None else range_end
-            assert range_end - range_start == past_key_values[0][0].shape[2]
-            assert len(self.past_key_values) > 0 and self.past_key_values[0][0].shape[2] >= range_end
-
-            # copy the new key-values to the kv-cache.
-            for i in range(len(past_key_values)):
-                for j in range(len(past_key_values[i])):
-                    self.past_key_values[i][j][:, :, range_start:range_end] = past_key_values[i][j]
+            # TODO(zhengda) to be implemented.
+            pass
 
     def get_key_values(self, block_start, block_end):
         """ Get the key-values given the block that is being decoded.
@@ -405,21 +466,15 @@ class KVCache:
         torch.Tensor : the tensor indicates the valid locations in the returned key-values.
         """
         # The key-value cache cannot be empty.
-        assert len(self.past_key_values) > 0
+        assert self.past_key_values is not None
 
-        if self.replace_position is not None and self.block_start == block_start and self.block_end == block_end:
-            return self.past_key_values, self.replace_position
-
-        # TODO(zhengda) this is a pretty hacky way to find out the batch size and the length of the sequence.
-        length = self.past_key_values[0][0].shape[2]
-        batch_size = 1
-        if self.cache_type == 'prefix':
-            self.replace_position = (block_start, length)
-        else:
-            self.replace_position = (block_start, block_end)
         self.block_start = block_start
         self.block_end = block_end
-        return self.past_key_values, self.replace_position
+        if self.cache_type == 'prefix':
+            replace_position = (block_start, self.past_key_values.seq_len)
+        else:
+            replace_position = (block_start, block_end)
+        return self.past_key_values, replace_position
 
 class KVCacheFactory:
     """ KV-cache factory.
@@ -431,7 +486,7 @@ class KVCacheFactory:
         self.cache_update_freq = cache_update_freq
 
     def create(self):
-        return KVCache(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type)
+        return DiffusionKVCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type)
 
 def gather_sequence_block(partial_data, partial_start, partial_end, block_start, block_end, rank, world_size):
     """ Gather the wanted block data from the partitioned data.
