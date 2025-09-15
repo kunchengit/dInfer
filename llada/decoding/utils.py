@@ -204,21 +204,27 @@ class BlockIterator:
         The token array that contains decoded tokens and stores the new generated tokens
     block_length : int
         The length of the block
+    start_block_align : bool
+        Align the first decoding block to the block size. The first block may overlap with the prompt.
     """
-    def __init__(self, x, block_length):
+    def __init__(self, x, block_length, start_block_align=False):
         self.x = x
         self.iter = 0
         self.block_length = block_length
+        self.start_block_align = start_block_align
 
     def __iter__(self):
         self.iter = 0
         return self
 
     def __next__(self):
-        current_block_start = (self.x.prompt.shape[1] // self.block_length) * self.block_length + self.iter * self.block_length
+        if self.start_block_align:
+            current_block_start = (self.x.prompt.shape[1] // self.block_length) * self.block_length + self.iter * self.block_length
+        else:
+            current_block_start = self.x.prompt.shape[1] + self.iter * self.block_length
         if current_block_start >= self.x.total_length:
             raise StopIteration
-        current_block_end = current_block_start + self.block_length
+        current_block_end = min(current_block_start + self.block_length, self.x.total_length)
         assert current_block_end <= self.x.total_length
         self.iter += 1
         return BlockLoc(current_block_start, current_block_end), self.x[current_block_start:current_block_end]
