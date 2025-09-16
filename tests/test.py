@@ -6,14 +6,15 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 
-from model.modeling_llada_origin import LLaDAModelLM
-from model.modeling_llada_fastdllm import LLaDAModelLM as LLaDAModelLM_fastdllm
-from decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
-from decoding.generate_fastdllm import generate, generate_with_prefix_cache, generate_with_dual_cache
-from decoding.generate_dist import generate as generate_sp
-from decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory
-from decoding.utils import ThresholdParallelDecoder, gather_sequence_block, BlockLoc
+from llada.model.modeling_llada_origin import LLaDAModelLM
+from llada.model.modeling_llada_fastdllm import LLaDAModelLM as LLaDAModelLM_fastdllm
+from llada.decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
+from llada.decoding.generate_fastdllm import generate, generate_with_prefix_cache, generate_with_dual_cache
+from llada.decoding.generate_dist import generate as generate_sp
+from llada.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory
+from llada.decoding.utils import ThresholdParallelDecoder, gather_sequence_block, BlockLoc
 
+model_path = "/mnt/dllm/model_hub/LLaDA-1.5/"
 
 def test_block_iterator():
     prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
@@ -75,7 +76,6 @@ class SimulateBlockIteratorFactory:
 def test_diffusion():
     torch.cuda.set_device(0)
     device = torch.device(0)
-    model_path = "/data/myx/llm/vllm/model/LLaDA-1_5"
     config = AutoConfig.from_pretrained(model_path)
     config.flash_attention = True
     model = LLaDAModelLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, config=config).eval()
@@ -129,7 +129,7 @@ def test_diffusion():
 
 def setup_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '12345'
+    os.environ['MASTER_PORT'] = '12346'
     print(f'rank={rank}, world size={world_size}')
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
@@ -201,7 +201,6 @@ def test_diffusion_worker(rank, world_size, gpu):
     torch.cuda.set_device(gpu)
     device = torch.device(gpu)
 
-    model_path = "/data/myx/llm/vllm/model/LLaDA-1_5"
     config = AutoConfig.from_pretrained(model_path)
     config.flash_attention = True
     model = LLaDAModelLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, config=config).eval()
@@ -240,9 +239,10 @@ def test_diffusion_sp():
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     logging.basicConfig(level=logging.INFO)
-    test_dist()
+    test_diffusion()
+
     test_token_array()
     test_block_iterator()
 
-    test_diffusion()
+    test_dist()
     test_diffusion_sp()
