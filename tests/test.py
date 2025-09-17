@@ -11,8 +11,8 @@ from llada.model.modeling_llada_fastdllm import LLaDAModelLM as LLaDAModelLM_fas
 from llada.decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
 from llada.decoding.generate_fastdllm import generate, generate_with_prefix_cache, generate_with_dual_cache
 from llada.decoding.generate_dist import generate as generate_sp
-from llada.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory
-from llada.decoding.utils import ThresholdParallelDecoder, gather_sequence_block, BlockLoc
+from llada.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory, gather_sequence_block, BlockLoc
+from llada.decoding.parallel_strategy import ThresholdParallelDecoder
 
 model_path = "/mnt/dllm/model_hub/LLaDA-1.5/"
 

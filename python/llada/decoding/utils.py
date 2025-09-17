@@ -17,7 +17,6 @@ def add_gumbel_noise(logits, temperature):
     gumbel_noise = (- torch.log(noise)) ** temperature
     return logits.exp() / gumbel_noise
 
-
 def get_num_transfer_tokens(mask_index, steps):
     '''
     In the reverse process, the interval [0, 1] is uniformly discretized into steps intervals.
@@ -55,39 +54,6 @@ def calculate_op_num(x, hidden_size=4096, mlp_hidden_size = 12288, vocab_size = 
     layer_ops = qkv_ops + attn_ops + ffn_ops
     op_num = cfg_factor * (num_hidden_layers*layer_ops + x.shape[0]*hidden_size*vocab_size*x.shape[1]*2)
     return op_num/1e12 
-
-#@torch.compile()
-#@torch.compile(mode='reduce-overhead', fullgraph=True)
-def get_transfer_index(logits, temperature, remasking, mask_index, x, num_transfer_tokens, threshold,
-        minimal_k=1, use_float64=False):
-    logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-    x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
-
-    if remasking == 'low_confidence':
-        if use_float64:
-            p = F.softmax(logits.to(torch.float64), dim=-1)
-        else:
-            p = F.softmax(logits, dim=-1)
-        x0_p = torch.squeeze(
-                torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
-    elif remasking == 'random':
-        x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
-    else:
-        raise NotImplementedError(remasking)
-    x0 = torch.where(mask_index, x0, x)
-    confidence = torch.where(mask_index, x0_p, -np.inf)
-
-    transfer_index = confidence >= threshold
-    # TODO(zhengda) assume the batch size = 1
-    if torch.sum(transfer_index) < num_transfer_tokens:
-        if num_transfer_tokens == 1:
-            transfer_index = torch.argmax(confidence, dim=1)
-        else:
-            topk_values, topk_indices = torch.topk(confidence, k=num_transfer_tokens, dim=1)
-            threshold = topk_values[:, -1]
-            transfer_index = confidence >= threshold
-
-    return x0, transfer_index
 
 class TokenArray:
     """ A token array to support read, update and expansion.
@@ -247,93 +213,6 @@ class BlockIteratorFactory:
     """
     def create(self, x, block_length):
         return BlockIterator(x, block_length)
-
-class ParallelDecoder:
-    """ This is a parallel decoder that decodes tokens in a block.
-    """
-    def __init__(self, temperature, remasking='low_confidence', mask_id=126336):
-        self.temperature = temperature
-        self.remasking = remasking
-        self.mask_id = mask_id
-
-    def block_init(self, block_x, block_id):
-        pass
-
-    def decode(self, logits, block_start, block_end, x):
-        """ Decode the logits in a block.
-
-        Parameters
-        ----------
-        logits : Tensor
-            The logits in a block
-        block_start : int
-            The location of the starting token in the block
-        block_end : int
-            The location of the ending token in the block.
-        x : Tensor
-            The tensor where the decoded tokens are written to.
-        """
-
-class ThresholdParallelDecoder(ParallelDecoder):
-    """ This decoder deocdes tokens in parallel based on a threshold.
-
-    The decoder decodes a token when its confidence score is larger than a threshold.
-    """
-    def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336, early_stop=False, use_float64=False,
-            num_mini_transfer_tokens=1):
-        super().__init__(temperature, remasking, mask_id)
-        self.threshold = threshold
-        self.early_stop = early_stop
-        self.eos_id = 126081
-        self.use_float64 = use_float64
-        self.num_mini_transfer_tokens = num_mini_transfer_tokens
-
-    def decode(self, logits, block_start, block_end, x):
-        """ Decode the logits in a block.
-        """
-        mask_index = (x[block_start:block_end] == self.mask_id)
-        assert mask_index.shape[1] == logits.shape[1]
-
-        curr_x = x[block_start:block_end]
-        x0, transfer_index = get_transfer_index(logits, self.temperature, self.remasking, mask_index, curr_x,
-                self.num_mini_transfer_tokens, self.threshold, use_float64=self.use_float64)
-        if transfer_index.dtype == torch.bool:
-            x[block_start:block_end][transfer_index] = x0[transfer_index]
-        else:
-            x[block_start:block_end][:, transfer_index] = x0[:, transfer_index]
-        # If we want to have early stop and there is an EOS decoded in the current block.
-        # TODO(zhengda) the code below is not well tested in the unit test.
-        if self.early_stop and torch.any(x0 == self.eos_id):
-            # Find the first location of EOS and set all tokens after the location to EOS.
-            # Here we assume that don't perform remasking.
-            # TODO(zhengda) here we assume the batch size is 1.
-            idx = int(torch.nonzero(x0[0] == self.eos_id)[0])
-            x[(block_start + idx):] = self.eos_id
-
-class FixedParallelDecoder(ParallelDecoder):
-    """ This decoder decodes tokens in a fixed number of steps.
-    """
-    def __init__(self, temperature, steps, remasking='low_confidence', mask_id=126336):
-        super().__init__(temperature, remasking, mask_id)
-        self.steps = steps
-        self.iter = 0
-
-    def block_init(self, block_x, block_id):
-        # TODO(zhengda) we need to handle steps correctly here when the distributed version changes the gen length.
-        block_mask_index = block_x == mask_id
-        self.num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
-        self.iter = 0
-
-    def decode(self, logits, block_start, block_end, x):
-        """ Decode the logits in a block.
-        """
-        mask_index = (x[block_start:block_end] == self.mask_id)
-        assert mask_index.shape[1] == logits.shape[1]
-
-        curr_x = x[block_start:block_end]
-        x0, transfer_index = get_transfer_index(logits, self.temperature, self.remasking, mask_index, curr_x, self.num_transfer_tokens[:, self.iter], None)
-        self.iter += 1
-        x[block_start:block_end][transfer_index] = x0[transfer_index]
 
 class KVCache:
     """ The KV-cache

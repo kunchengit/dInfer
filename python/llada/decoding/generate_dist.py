@@ -24,7 +24,7 @@ import torch.distributed as dist
 
 from ..model.modeling_llada import LLaDAModelLM
 from .utils import get_num_transfer_tokens, add_gumbel_noise, calculate_op_num
-from .parellel_strategy import get_transfer_index, get_transfer_index_dynamic
+from .parallel_strategy import get_transfer_index, get_transfer_index_dynamic
 
 
 
