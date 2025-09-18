@@ -72,11 +72,12 @@ class TokenArray:
     device : Torch.Device
         The device where the token array is placed on.
     """
-    def __init__(self, prompt, gen_length, mask_id, device):
+    def __init__(self, prompt, gen_length, mask_id, eos_id, device):
         self.prompt = prompt
         self.data = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(device)
         self.data[:, :prompt.shape[1]] = prompt.clone()
         self.gen_length = gen_length
+        self.eos_id = eos_id
 
     @property
     def total_length(self):
@@ -91,7 +92,7 @@ class TokenArray:
 
     def get_generated_tokens(self):
         # TODO(zhengda) we need to define the EOS token
-        return self.data[self.data != 126081]
+        return self.data[self.data != self.eos_id]
 
     def __getitem__(self, idx):
         return self.data[:, idx]

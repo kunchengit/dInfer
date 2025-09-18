@@ -11,9 +11,9 @@ import torch.distributed as dist
 import time
 import tqdm
 
-from decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
-from decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory
-from decoding.utils import ThresholdParallelDecoder, gather_sequence_block, BlockLoc
+from llada.decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
+from llada.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory, gather_sequence_block, BlockLoc
+from llada.decoding import ThresholdParallelDecoder
 
 def setup_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
@@ -68,7 +68,7 @@ def main(world_size, rank, gpu_id, args):
     setup_distributed(rank, world_size)
 
     if args.tp:
-        from model.modeling_llada_origin import LLaDAModelLM        
+        from llada.model.modeling_llada_origin import LLaDAModelLM
         model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
         if world_size>1:
             model.tensor_parallel(rank, world_size)
@@ -77,7 +77,7 @@ def main(world_size, rank, gpu_id, args):
         model = model.to(device)
         model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
     else:
-        from model.modeling_llada import LLaDAModelLM
+        from llada.model.modeling_llada import LLaDAModelLM
         model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
         model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
@@ -109,7 +109,7 @@ import argparse
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', type=str, default='/data/myx/llm/vllm/model/LLaDA-1_5')
+    parser.add_argument('--model_name', type=str, default='/mnt/dllm/model_hub/LLaDA-1.5/')
     parser.add_argument('--input_data', type=str, default=None)
     parser.add_argument('--gpu', type=str, default='0')
     parser.add_argument('--batch_size', type=int, default=1)

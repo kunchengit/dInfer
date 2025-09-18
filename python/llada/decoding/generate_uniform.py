@@ -84,7 +84,7 @@ class BlockWiseDiffusionLLM:
     def _generate(self, prompt, gen_length=128, block_length=128):
         ''' Generate tokens with diffusion iterations block by block.
         '''
-        x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
+        x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 
         iter_no = 0
@@ -141,7 +141,7 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
     def _generate(self, prompt, gen_length=128, block_length=128):
         ''' Generate tokens with diffusion iterations block by block.
         '''
-        x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device)
+        x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 
         kv_cache = self.cache_factory.create()

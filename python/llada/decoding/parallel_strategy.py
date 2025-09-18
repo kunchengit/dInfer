@@ -296,12 +296,12 @@ class ThresholdParallelDecoder(ParallelDecoder):
 
     The decoder decodes a token when its confidence score is larger than a threshold.
     """
-    def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336, early_stop=False, use_float64=False,
-            num_mini_transfer_tokens=1):
+    def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336, eos_id=126081,
+            early_stop=False, use_float64=False, num_mini_transfer_tokens=1):
         super().__init__(temperature, remasking, mask_id)
         self.threshold = threshold
         self.early_stop = early_stop
-        self.eos_id = 126081
+        self.eos_id = eos_id
         self.use_float64 = use_float64
         self.num_mini_transfer_tokens = num_mini_transfer_tokens
 
@@ -313,7 +313,7 @@ class ThresholdParallelDecoder(ParallelDecoder):
 
         curr_x = x[block_start:block_end]
         x0, transfer_index = get_transfer_index_threshold(logits, self.temperature, mask_index, curr_x,
-                self.num_mini_transfer_tokens, self.mask_id, self.threshold, use_float64=self.use_float64)
+                self.num_mini_transfer_tokens, self.mask_id, threshold=self.threshold, use_float64=self.use_float64)
         if transfer_index.dtype == torch.bool:
             x[block_start:block_end][transfer_index] = x0[transfer_index]
         else:
