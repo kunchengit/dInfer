@@ -5,7 +5,10 @@ from multiprocessing import Process
 import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer, AutoModel, AutoConfig
+from vllm.config import CompilationConfig, ParallelConfig
+from vllm.config import VllmConfig, set_current_vllm_config, get_current_vllm_config
 
+from llada.model.modeling_fused_olmoe import FusedOlmoeForCausalLM
 from llada.model.modeling_llada_origin import LLaDAModelLM
 from llada.model.modeling_llada_fastdllm import LLaDAModelLM as LLaDAModelLM_fastdllm
 from llada.decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
@@ -13,12 +16,14 @@ from llada.decoding.generate_fastdllm import generate, generate_with_prefix_cach
 from llada.decoding.generate_dist import generate as generate_sp
 from llada.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory, gather_sequence_block, BlockLoc
 from llada.decoding.parallel_strategy import ThresholdParallelDecoder
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 model_path = "/mnt/dllm/model_hub/LLaDA-1.5/"
+moe_model_path = '/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_15t_0827_500B_further_8k_enneal_train_4k_ep3_v7_1e-5/step45567_converted_hf_fusemoe'
 
 def test_block_iterator():
     prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
-    x = TokenArray(prompt, gen_length=10, mask_id=17, device='cpu')
+    x = TokenArray(prompt, gen_length=10, mask_id=17, eos_id=18, device='cpu')
     it = BlockIterator(x, block_length=5)
     num_iters = 0
     for block_id, (block_loc, block) in enumerate(it):
@@ -29,12 +34,12 @@ def test_block_iterator():
 
 def test_token_array():
     prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
-    arr = TokenArray(prompt, gen_length=20, mask_id=17, device='cpu')
+    arr = TokenArray(prompt, gen_length=20, mask_id=17, eos_id=18, device='cpu')
     assert arr.total_length == prompt.shape[1] + 20
     assert torch.all(arr[0:5] == prompt[:, 0:5])
     arr[8:10] = torch.tensor([9, 10]).view(1, 2)
 
-    arr = DistAlignedTokenArray(prompt, gen_length=20, mask_id=17, device='cpu', rank=0, world_size=4)
+    arr = DistAlignedTokenArray(prompt, gen_length=20, mask_id=17, eos_id=18, device='cpu', rank=0, world_size=4)
     assert arr.total_length == prompt.shape[1] + 20 + 1
     assert torch.all(arr[0:5] == prompt[:, 0:5])
     arr[8:10] = torch.tensor([9, 10]).view(1, 2)
@@ -73,6 +78,53 @@ class SimulateBlockIteratorFactory:
     def create(self, x, block_length):
         return SimulateBlockIterator(x, block_length, 126336)
 
+
+def test_moe_diffusion():
+    torch.cuda.set_device(0)
+    device = torch.device(0)
+
+    decoder = ThresholdParallelDecoder(0, threshold=0.9, early_stop=False, mask_id=156895, eos_id=156892, use_float64=True)
+    tokenizer = AutoTokenizer.from_pretrained(moe_model_path, trust_remote_code=True)
+    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
+    m = [{"role": "user", "content": prompt}, ]
+    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+    input_ids = tokenizer(prompt)['input_ids']
+    batch_size = 1
+    input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
+
+    from vllm import distributed
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12346'
+    distributed.init_distributed_environment(1, 0, 'env://', 0, 'nccl')
+    distributed.initialize_model_parallel(1, backend='nccl')
+    print("[Loading model]")
+    # setup EP
+    parallel_config = ParallelConfig(enable_expert_parallel = True)
+    with set_current_vllm_config(VllmConfig(parallel_config = parallel_config)):
+        model_config = AutoConfig.from_pretrained(moe_model_path, trust_remote_code=True)
+        model = FusedOlmoeForCausalLM(config=model_config).eval()
+        model.load_weights(moe_model_path, torch_dtype=torch.bfloat16)
+        tokenizer = AutoTokenizer.from_pretrained(moe_model_path, trust_remote_code=True)
+        model = model.to(device)
+
+        # Test generation without cache.
+        print('Test block-wise diffusion LLM without KV-cache')
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
+        res = dllm._generate(input_ids, gen_length=128, block_length=32)
+        res1, nfe = generate(model, input_ids, gen_length=128, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892)
+        res1 = res1[res1 != 156892]
+        assert len(res) == len(res1)
+        assert torch.all(res == res1)
+
+        # Test generation with dual cache
+        print('Test block-wise diffusion LLM with dual KV-cache')
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+        res = dllm._generate(input_ids, gen_length=256, block_length=32)
+        res1, nfe = generate_with_dual_cache(model, input_ids, gen_length=256, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892)
+        res1 = res1[res1 != 156892]
+        assert len(res) == len(res1)
+        assert torch.all(res == res1)
+
 def test_diffusion():
     torch.cuda.set_device(0)
     device = torch.device(0)
@@ -82,7 +134,7 @@ def test_diffusion():
     model = model.to(device)
     fastdllm_model = LLaDAModelLM_fastdllm.from_pretrained(model_path, torch_dtype=torch.bfloat16, config=config).eval()
     fastdllm_model = fastdllm_model.to(device)
-    decoder = ThresholdParallelDecoder(0, threshold=0.9, use_float64=True)
+    decoder = ThresholdParallelDecoder(0, threshold=0.9, use_float64=True, early_stop=False)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
@@ -129,7 +181,7 @@ def test_diffusion():
 
 def setup_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '12346'
+    os.environ['MASTER_PORT'] = '12347'
     print(f'rank={rank}, world size={world_size}')
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
@@ -239,6 +291,7 @@ def test_diffusion_sp():
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     logging.basicConfig(level=logging.INFO)
+    test_moe_diffusion()
     test_diffusion()
 
     test_token_array()

@@ -122,7 +122,7 @@ class DistAlignedTokenArray:
     world_size : int
         The number of processes.
     """
-    def __init__(self, prompt, gen_length, mask_id, device, rank, world_size):
+    def __init__(self, prompt, gen_length, mask_id, eos_id, device, rank, world_size):
         total_length = prompt.shape[1] + gen_length
         if total_length % world_size != 0:
             total_length = (total_length // world_size + 1) * world_size
@@ -131,6 +131,7 @@ class DistAlignedTokenArray:
         self.orig_gen_length = gen_length
         self.gen_length = total_length - prompt.shape[1]
         self.prompt = prompt
+        self.eos_id = eos_id
 
     @property
     def total_length(self):
@@ -142,7 +143,7 @@ class DistAlignedTokenArray:
 
     def get_generated_tokens(self):
         # TODO(zhengda) we need to define the EOS token
-        return self.data[self.data != 126081]
+        return self.data[self.data != self.eos_id]
 
     def expand(self, new_len):
         pass
@@ -330,11 +331,10 @@ class DiffusionKVCacheManager:
         range_end : int
             The end of the range that is being updated.
         """
-        if range_start is None:
-            self.past_key_values = KVCache(past_key_values)
+        if isinstance(past_key_values, KVCache):
+            self.past_key_values = past_key_values
         else:
-            # TODO(zhengda) to be implemented.
-            pass
+            self.past_key_values = KVCache(past_key_values)
 
     def get_key_values(self, block_start, block_end):
         """ Get the key-values given the block that is being decoded.

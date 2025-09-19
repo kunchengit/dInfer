@@ -316,7 +316,7 @@ class ThresholdParallelDecoder(ParallelDecoder):
                 self.num_mini_transfer_tokens, self.mask_id, threshold=self.threshold, use_float64=self.use_float64)
         transfer_index = torch.logical_and(transfer_index, mask_index)
         assert transfer_index.dtype == torch.bool
-        x[:, block_start:block_end] = torch.where(transfer_index, x0, curr_x)
+        x[block_start:block_end] = torch.where(transfer_index, x0, curr_x)
         # If we want to have early stop and there is an EOS decoded in the current block.
         # TODO(zhengda) the code below is not well tested in the unit test.
         if self.early_stop and torch.any(x[block_start:block_end] == self.eos_id):

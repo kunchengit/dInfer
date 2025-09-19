@@ -18,11 +18,10 @@ from llada.decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindow
 from llada.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory, gather_sequence_block, BlockLoc
 from llada.decoding import ThresholdParallelDecoder
 
-def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True):
+def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True):
     device = model.device
     input_ids = tokenizer(prompt)['input_ids']
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
-    gen_len = total_len - input_ids.shape[1]
     print('prompt len:', input_ids.shape[1], ', total len:', input_ids.shape[1] + gen_len)
     prompt_shape = input_ids.shape
 
@@ -86,7 +85,7 @@ def main(world_size, rank, gpu_id, args):
         model = model.to(device)
         prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours?"
 
-        benchmark_gen(rank, model, tokenizer, prompt, args.total_len, args.block_length, args.threshold, args.cache)
+        benchmark_gen(rank, model, tokenizer, prompt, args.gen_len, args.block_length, args.threshold, args.cache)
         
         # dist.destroy_process_group()
 
@@ -100,7 +99,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default='/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_15t_0827_500B_further_8k_enneal_train_4k_ep3_v7_1e-5/step45567_converted_hf_fusemoe')
     parser.add_argument('--gpu', type=str, default='0,1,2,3')
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--total_len', type=int, default=1024)
+    parser.add_argument('--gen_len', type=int, default=256)
     parser.add_argument('--prompt_length', type=int, default=0)
     parser.add_argument('--block_length', type=int, default=128)
     parser.add_argument('--threshold', type=float, default=0.9)

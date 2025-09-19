@@ -119,7 +119,7 @@ class BlockWiseDiffusionLLM:
                 self.decoder.decode(logits, block_loc.start, block_loc.end, x)
                 iter_no += 1
 
-        logger.info(f'The number of diffusion iterations with kv-cache: {self.num_forwards}')
+        logger.info(f'The number of diffusion iterations: {self.num_forwards}')
         return x.get_generated_tokens()
 
 class SlidingWindowDiffusionLLM(DiffusionLLM):
@@ -205,7 +205,7 @@ class BlockWiseDiffusionLLMWithSP(DiffusionLLM):
             block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
         '''
         op_num = 0
-        x = DistAlignedTokenArray(prompt, gen_length, self.decoder.mask_id, self.model.device, self.rank, self.world_size)
+        x = DistAlignedTokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device, self.rank, self.world_size)
         it = self.iterator_factory.create(x, block_length)
 
         for block_id, (block_loc, block) in enumerate(it):

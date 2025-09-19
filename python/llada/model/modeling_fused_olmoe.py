@@ -1162,9 +1162,11 @@ class FusedOlmoeForCausalLM(OlmoePreTrainedModel):
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
 
+        past_key_values = KVCache(outputs.past_key_values) if outputs.past_key_values is not None else None
+
         return MoeCausalLMOutputWithPast(
             logits=logits,
-            past_key_values=outputs.past_key_values,
+            past_key_values=past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
             router_logits=outputs.router_logits,

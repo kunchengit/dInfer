@@ -21,6 +21,7 @@ import torch.nn.functional as F
 import os
 from transformers import AutoTokenizer, AutoModel
 from ..model.modeling_llada_fastdllm import LLaDAModelLM
+from ..model.modeling_fused_olmoe import FusedOlmoeForCausalLM
 from .utils import get_num_transfer_tokens, add_gumbel_noise
 from .parallel_strategy import get_transfer_index, get_transfer_index_dynamic
 
@@ -62,7 +63,7 @@ def generate_fastdllm (model, prompt, steps=128, gen_length=128, block_length=12
 
 @ torch.no_grad()
 def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-             remasking='low_confidence', mask_id=126336, threshold=None, factor=None, early_stop=False):
+             remasking='low_confidence', mask_id=126336, eos_id=126081, threshold=None, factor=None, early_stop=False):
     '''
     Args:
         model: Mask predictor.
@@ -75,8 +76,6 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
         remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
     '''
-    eos_id = 126081
-
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
 
@@ -124,7 +123,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
 
 @ torch.no_grad()
 def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-             remasking='low_confidence', mask_id=126336, threshold=None, factor=None, early_stop = False):
+             remasking='low_confidence', mask_id=126336, eos_id=126081, threshold=None, factor=None, early_stop = False):
     '''
     Args:
         model: Mask predictor.
@@ -137,8 +136,6 @@ def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_l
         remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
     '''
-    eos_id = 126081
-
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
 
@@ -215,7 +212,7 @@ def generate_with_prefix_cache(model, prompt, steps=128, gen_length=128, block_l
 
 @ torch.no_grad()
 def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-            remasking='low_confidence', mask_id=126336, threshold=None, factor=None, early_stop = False):
+            remasking='low_confidence', mask_id=126336, eos_id=126081, threshold=None, factor=None, early_stop = False):
     '''
     Args:
         model: Mask predictor.
@@ -228,8 +225,6 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
         remasking: Remasking strategy. 'low_confidence' or 'random'.
         mask_id: The toke id of [MASK] is 126336.
     '''
-    eos_id = 126081
-
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
 
@@ -260,8 +255,11 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
         nfe += 1
 
         i = 1
-        replace_position = torch.zeros_like(x, dtype=torch.bool)
-        replace_position[:, current_block_start:current_block_end] = 1
+        if isinstance(model, FusedOlmoeForCausalLM):
+            replace_position = (current_block_start, current_block_end)
+        else:
+            replace_position = torch.zeros_like(x, dtype=torch.bool)
+            replace_position[:, current_block_start:current_block_end] = 1
         while True:
             if (x[:, current_block_start:current_block_end] == mask_id).sum() == 0:
                 break
