@@ -314,13 +314,12 @@ class ThresholdParallelDecoder(ParallelDecoder):
         curr_x = x[block_start:block_end]
         x0, transfer_index = get_transfer_index_threshold(logits, self.temperature, mask_index, curr_x,
                 self.num_mini_transfer_tokens, self.mask_id, threshold=self.threshold, use_float64=self.use_float64)
-        if transfer_index.dtype == torch.bool:
-            x[block_start:block_end][transfer_index] = x0[transfer_index]
-        else:
-            x[block_start:block_end][:, transfer_index] = x0[:, transfer_index]
+        transfer_index = torch.logical_and(transfer_index, mask_index)
+        assert transfer_index.dtype == torch.bool
+        x[:, block_start:block_end] = torch.where(transfer_index, x0, curr_x)
         # If we want to have early stop and there is an EOS decoded in the current block.
         # TODO(zhengda) the code below is not well tested in the unit test.
-        if self.early_stop and torch.any(x0 == self.eos_id):
+        if self.early_stop and torch.any(x[block_start:block_end] == self.eos_id):
             # Find the first location of EOS and set all tokens after the location to EOS.
             # Here we assume that don't perform remasking.
             # TODO(zhengda) here we assume the batch size is 1.
