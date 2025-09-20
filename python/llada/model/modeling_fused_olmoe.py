@@ -571,6 +571,11 @@ class OlmoeMoE(nn.Module):
                                 tp_size=None,
                                 # enable_eplb=True,
                                 prefix=f"{prefix}.experts")
+        # This is a hack. expert_map in FusedMoE isn't moved to GPU by default.
+        # We have to register it explicitly so that it can be moved to GPU with FusedMoE
+        expert_map = self.experts.expert_map
+        del self.experts.expert_map
+        self.experts.register_buffer('expert_map', expert_map)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
