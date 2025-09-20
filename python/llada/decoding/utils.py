@@ -225,29 +225,38 @@ class KVCache:
         The keys and values of each transformer layer.
     """
     def __init__(self, past_key_values):
-        inner_shape = past_key_values[0].shape
         assert len(past_key_values) % 2 == 0
-        num_layers = len(past_key_values) // 2
+        self._data = past_key_values
+
+    def consolidate(self):
+        if isinstance(self._data, torch.Tensor):
+            return
+
+        num_layers = len(self._data) // 2
+        inner_shape = self._data[0].shape
         # The shape is [num_layers, 2, batch_size, num_heads, seq_len, hidden_dim]
-        # TODO(zhengda) we may want to postpone the concatenation to avoid additional data copy for cudagraph.
-        self._data = torch.stack(past_key_values, dim=0).reshape(num_layers, 2, *inner_shape)
+        self._data = torch.stack(self._data, dim=0).reshape(num_layers, 2, *inner_shape)
 
     @property
     def num_layers(self):
+        assert isinstance(self._data, torch.Tensor)
         return self._data.shape[0]
 
     @property
     def seq_len(self):
+        assert isinstance(self._data, torch.Tensor)
         return self._data.shape[4]
 
     def get_keys(self, layer_idx):
         """ Get the keys of a transformer layer.
         """
+        assert isinstance(self._data, torch.Tensor)
         return self._data[layer_idx][0]
 
     def get_values(self, layer_idx):
         """ Get the values of a transformer layer.
         """
+        assert isinstance(self._data, torch.Tensor)
         return self._data[layer_idx][1]
 
     def update(self, key_states, val_states, layer_idx, replace_position=None):
@@ -335,6 +344,8 @@ class DiffusionKVCacheManager:
             self.past_key_values = past_key_values
         else:
             self.past_key_values = KVCache(past_key_values)
+        # We should make sure the kv-cache in all layers are converted into a tensor.
+        self.past_key_values.consolidate()
 
     def get_key_values(self, block_start, block_end):
         """ Get the key-values given the block that is being decoded.

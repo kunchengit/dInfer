@@ -22,7 +22,7 @@ import os
 from transformers import AutoTokenizer, AutoModel
 from ..model.modeling_llada_fastdllm import LLaDAModelLM
 from ..model.modeling_fused_olmoe import FusedOlmoeForCausalLM
-from .utils import get_num_transfer_tokens, add_gumbel_noise
+from .utils import get_num_transfer_tokens, add_gumbel_noise, KVCache
 from .parallel_strategy import get_transfer_index, get_transfer_index_dynamic
 
 
@@ -245,6 +245,8 @@ def generate_with_dual_cache(model, prompt, steps=128, gen_length=128, block_len
         # cache init and update
         output = model(x, use_cache=True)
         past_key_values = output.past_key_values
+        if isinstance(past_key_values, KVCache):
+            past_key_values.consolidate()
         mask_index = (x == mask_id)
         mask_index[:, current_block_end:] = 0
         if factor is None:
