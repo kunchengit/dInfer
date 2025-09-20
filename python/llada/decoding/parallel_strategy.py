@@ -271,7 +271,7 @@ def get_transfer_index_threshold(logits, temperature, mask_index, x, num_transfe
     if use_float64:
         p = F.softmax(logits.to(torch.float64), dim=-1)
     else:
-        p = F.softmax(logits, dim=-1)
+        p = F.softmax(logits.to(torch.float32), dim=-1)
     x0_p = torch.squeeze(
         torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
     
