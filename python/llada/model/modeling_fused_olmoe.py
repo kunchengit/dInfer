@@ -72,6 +72,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 if is_flash_attn_2_available():
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
+from torch.nn.modules.normalization import RMSNorm
 
 logger = logging.get_logger(__name__)
 
@@ -110,27 +111,7 @@ def replace_linear_class(
         return_bias=False,
     )
 
-
-class OlmoeRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-5):
-        """
-        OlmoeRMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-    def extra_repr(self):
-        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
-
-
+OlmoeRMSNorm = RMSNorm
 ALL_LAYERNORM_LAYERS.append(OlmoeRMSNorm)
 
 
@@ -584,7 +565,7 @@ class OlmoeMoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (num_tokens, n_experts)
         original_dtype = hidden_states.dtype
-        # hidden_states = hidden_states.to(torch.float32)
+        hidden_states = hidden_states.to(torch.float32)
         router_logits, _ = self.gate(hidden_states)
         hidden_states = hidden_states.to(original_dtype)
         final_hidden_states = self.experts.forward_impl(hidden_states=hidden_states,
@@ -1031,8 +1012,7 @@ class FusedOlmoeForCausalLM(OlmoePreTrainedModel):
         super().load_state_dict(new_state_dict, strict=strict)
         for name, param in self.named_parameters():
             if 'gate' in name:
-                # param.data = param.data.to(torch.float32)
-                param.data = param.data.to(dtype)
+                param.data = param.data.to(torch.float32)
             else:
                 param.data = param.data.to(dtype)
     
