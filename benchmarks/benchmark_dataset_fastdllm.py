@@ -13,9 +13,8 @@ from vllm.config import VllmConfig, set_current_vllm_config, get_current_vllm_co
 from vllm.forward_context import set_forward_context
 import json
 
-from llada.decoding.generate_fastdllm import generate_fastdllm
-from llada.model.modeling_fused_olmoe import FusedOlmoeForCausalLM
-from llada.model.modeling_llada import LLaDAModelLM
+from dinfer.decoding.generate_fastdllm import generate_fastdllm
+from dinfer.model import LLaDAModelLM, FusedOlmoeForCausalLM
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 

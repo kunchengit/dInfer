@@ -13,10 +13,9 @@ from vllm.config import VllmConfig, set_current_vllm_config, get_current_vllm_co
 from vllm.forward_context import set_forward_context
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-from llada.model.modeling_fused_olmoe import FusedOlmoeForCausalLM
-from llada.decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
-from llada.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory, gather_sequence_block, BlockLoc
-from llada.decoding import ThresholdParallelDecoder
+from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
+from dinfer.decoding.utils import BlockIteratorFactory, KVCacheFactory
+from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM
 
 def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True):
     device = model.device
@@ -25,13 +24,13 @@ def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold,
     print('prompt len:', input_ids.shape[1], ', total len:', input_ids.shape[1] + gen_len)
     prompt_shape = input_ids.shape
 
-    decoder = ThresholdParallelDecoder(0, threshold=threshold, early_stop=True, mask_id=156895, eos_id=156892)
+    decoder = ThresholdParallelDecoder(0, threshold=threshold, mask_id=156895, eos_id=156892)
     if cache == 'prefix':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('prefix'), early_stop=True)
     elif cache == 'dual':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('dual'), early_stop=True)
     else:
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
 
     # warm up
     if have_warmup:

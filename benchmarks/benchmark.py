@@ -11,9 +11,8 @@ import torch.distributed as dist
 import time
 import tqdm
 
-from llada.decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
-from llada.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory, gather_sequence_block, BlockLoc
-from llada.decoding import ThresholdParallelDecoder
+from dinfer.decoding.utils import BlockIteratorFactory, KVCacheFactory
+from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM
 
 def setup_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
@@ -29,13 +28,13 @@ def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshol
     print('prompt len:', input_ids.shape[1], ', total len:', input_ids.shape[1] + gen_len)
     prompt_shape = input_ids.shape
 
-    decoder = ThresholdParallelDecoder(0, threshold=threshold, early_stop=True)
+    decoder = ThresholdParallelDecoder(0, threshold=threshold)
     if cache == 'prefix':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('prefix'), early_stop=True)
     elif cache == 'dual':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('dual'), early_stop=True)
     else:
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
 
     # warm up
     if have_warmup:
@@ -68,7 +67,7 @@ def main(world_size, rank, gpu_id, args):
     setup_distributed(rank, world_size)
 
     if args.tp:
-        from llada.model.modeling_llada_origin import LLaDAModelLM
+        from dinfer.model.modeling_llada_origin import LLaDAModelLM
         model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
         if world_size>1:
             model.tensor_parallel(rank, world_size)
@@ -77,7 +76,7 @@ def main(world_size, rank, gpu_id, args):
         model = model.to(device)
         model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
     else:
-        from llada.model.modeling_llada import LLaDAModelLM
+        from dinfer.model.modeling_llada import LLaDAModelLM
         model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
         model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
