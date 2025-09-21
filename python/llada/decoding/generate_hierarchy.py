@@ -3,10 +3,8 @@ import math
 import torch
 import numpy as np
 import torch.nn.functional as F
-
-from .parellel_strategy import get_transfer_index_hierarchy_remask, get_transfer_index_threshold, get_transfer_index_hierarchy_fast_v2
 from .utils import get_num_transfer_tokens
-
+from .parallel_strategy import get_transfer_index_hierarchy_remask, get_transfer_index_threshold, get_transfer_index_hierarchy_fast_v2
 
 @ torch.no_grad()
 def generate_hierarchy(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
@@ -57,7 +55,7 @@ def generate_hierarchy(model, prompt, steps=128, gen_length=128, block_length=12
             logits = model(x).logits
             # mask_index[:, prompt.shape[1] + (num_block + 1) * block_length:] = 0
             logits_block = logits [:, block_st: block_ed]
-            x0, transfer_index = get_transfer_index_cur(logits_block, temperature, mask_index, x_block, 
+            x0, transfer_index = get_transfer_index_cur(logits_block, temperature,'low_confidence', mask_index, x_block, 
                 num_transfer_tokens[:, i] if threshold is None else None, mask_id, threshold)
             x_block[transfer_index] = x0[transfer_index]
             i += 1
