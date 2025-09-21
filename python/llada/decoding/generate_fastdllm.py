@@ -26,7 +26,7 @@ from .utils import get_num_transfer_tokens, add_gumbel_noise, KVCache
 from .parallel_strategy import get_transfer_index, get_transfer_index_dynamic
 
 
-def generate_fastdllm (model, prompt, steps=128, gen_length=128, block_length=128, temperature=0., mask_id=126336, decoding="fastdllm", **kwargs):
+def generate_fastdllm (model, prompt, steps=128, gen_length=128, block_length=128, temperature=0., mask_id=126336, eos_id=126081, decoding="fastdllm", **kwargs):
     '''
     Args:
         model: Mask predictor.
@@ -47,16 +47,15 @@ def generate_fastdllm (model, prompt, steps=128, gen_length=128, block_length=12
     factor = kwargs.get('factor', None)
     early_stop = kwargs.get("early_stop", False)
 
-
     if use_cache:
         if dual_cache:
             generated_answer, nfe = generate_with_dual_cache(model, prompt, steps, gen_length, block_length, temperature, remasking, 
-                mask_id, threshold, factor, early_stop)
+                mask_id, eos_id, threshold, factor, early_stop)
         else:
             generated_answer, nfe = generate_with_prefix_cache(model, prompt, steps, gen_length, block_length, temperature, remasking, 
-                mask_id, threshold, factor, early_stop)
+                mask_id, eos_id, threshold, factor, early_stop)
     else:
-        generated_answer, nfe = generate(model, prompt, steps, gen_length, block_length, temperature, remasking, mask_id, threshold, factor, early_stop)
+        generated_answer, nfe = generate(model, prompt, steps, gen_length, block_length, temperature, remasking, mask_id, eos_id, threshold, factor, early_stop)
 
     return generated_answer, nfe
 
