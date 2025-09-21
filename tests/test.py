@@ -17,6 +17,7 @@ from llada.decoding.generate_dist import generate as generate_sp
 from llada.decoding.generate_hierarchy import generate_hierarchy
 from llada.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory, gather_sequence_block, BlockLoc
 from llada.decoding.parallel_strategy import ThresholdParallelDecoder, HierarchyDecoder
+from llada.decoding.generate_merge import generate_merge
 # from llada.decoding.parallel_hierarchy import HierarchyDecoder
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
@@ -113,16 +114,20 @@ def test_moe_diffusion():
         model = model.to(device)
 
         # Test generation without cache.
-        print('Test block-wise diffusion LLM without KV-cache')
+        print('Test block-wise diffusion MOE-LLM without KV-cache')
         dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
         res = dllm._generate(input_ids, gen_length=128, block_length=32)
         res1, nfe = generate(model, input_ids, gen_length=128, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892)
+        res2, nfe = generate_merge(model, input_ids, None, gen_length=128, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892, parallel_decoding='threshold', early_stop=False,)
         res1 = res1[res1 != 156892]
+        res2 = res2[res2 != 156892]
         assert len(res) == len(res1)
+        assert len(res) == len(res2)
         assert torch.all(res == res1)
+        assert torch.all(res == res2)
 
         # Test generation with dual cache
-        print('Test block-wise diffusion LLM with dual KV-cache')
+        print('Test block-wise diffusion MOE-LLM with dual KV-cache')
         dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True, cache_factory=KVCacheFactory('dual'))
         res = dllm._generate(input_ids, gen_length=256, block_length=32)
         res1, nfe = generate_with_dual_cache(model, input_ids, gen_length=256, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892)
@@ -131,7 +136,7 @@ def test_moe_diffusion():
         assert torch.all(res == res1)
 
         # Test generation without cache.
-        print('Test block-wise hierarchical diffusion LLM without KV-cache')
+        print('Test block-wise hierarchical diffusion MOE-LLM without KV-cache')
         dllm = BlockWiseDiffusionLLM(model, h_decoder, BlockIteratorFactory(), early_stop=True)
         res = dllm._generate(input_ids, gen_length=128, block_length=32)
         res1, nfe = generate_hierarchy(model, input_ids, gen_length=128, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892,decoding='hierarchy_fast_v2',
