@@ -220,14 +220,9 @@ class BlockWiseDiffusionLLMCont(BlockWiseDiffusionLLM):
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
         return x.get_generated_tokens()
 
-
 class SlidingWindowDiffusionLLM(DiffusionLLM):
-    """ This diffusion LLM inference generates tokens in a sliding window manner.
-
-    The decoding algorithm defines a window to decode tokens in each diffusion iteration.
-    After each iteration, the decoding window may slide forward to cover more masked tokens.
-    """
-    def __init__(self, model, decoder, iterator_factory, cache_factory, update_kv_with_block=False):
+    def __init__(self, model, decoder, iterator_factory, cache_factory, update_kv_with_block=False,
+                 prefix_look=0, after_look=0, warmup_steps=1, early_stop=True):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
@@ -235,36 +230,65 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
         self.update_kv_with_block = update_kv_with_block
         self.num_forwards = 0
         self.cache_updates = 0
+        self.prefix_look = int(prefix_look)
+        self.after_look = int(after_look)
+        self.warmup_steps = int(warmup_steps)
+        self.early_stop = early_stop
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
-        ''' Generate tokens with diffusion iterations block by block.
-        '''
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 
         kv_cache = self.cache_factory.create()
-        for iter_no, (window_loc, window) in enumerate(it):
-            # refresh the entire KV-cache
-            if kv_cache.require_update(iter_no, window_loc.start, window_loc.end):
-                output = self.model(x.data, use_cache=True)
+        prompt_len = x.prompt.shape[1]
+        total_len = x.total_length
+
+        for block_idx, (block_loc, block) in enumerate(it):
+            block_start, block_end = block_loc.start, block_loc.end
+            left_start = max(prompt_len, block_start - self.prefix_look)
+            right_end = min(total_len, block_end + self.after_look)
+            if right_end < block_end:
+                right_end = block_end
+
+            iter_in_block = 0
+            while (x[block_start:block_end] == self.decoder.mask_id).sum() > 0:
+                if block_idx == 0 and iter_in_block < self.warmup_steps:
+                    out_full = self.model(x.data)
+                    self.num_forwards += 1
+                    self.decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x)
+                    iter_in_block += 1
+                    continue
+
+                if kv_cache.past_key_values is None or (kv_cache.require_update(iter_in_block, block_start, block_end) and block_idx > 0):
+                    out_full = self.model(x.data, use_cache=True)
+                    self.num_forwards += 1
+                    self.decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x)
+                    kv_cache.update(out_full.past_key_values)
+                    self.cache_updates += 1
+
+                window_input = x.data[:, left_start:right_end]
+                past_key_values, replace_position = kv_cache.get_key_values(left_start, right_end)
+                out_step = self.model(
+                    window_input,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    replace_position=replace_position
+                )
+
                 self.num_forwards += 1
-                # use the generated output to decode.
-                self.decoder.decode(output.logits[:, window_loc.start:window_loc.end], window_loc.start, window_loc.end, x)
-                # update the kv-cache
-                kv_cache.update(output.past_key_values)
-                self.cache_updates += 1
+                offset = block_start - left_start
+                logits_block = out_step.logits[:, offset:offset + (block_end - block_start)]
+                self.decoder.decode(logits_block, block_start, block_end, x)
 
-            past_key_values, replace_position = kv_cache.get_key_values(window_loc.start, window_loc.end)
-            output = self.model(window, past_key_values=past_key_values, use_cache=True, replace_position=replace_position)
-            # decode in the current window
-            self.decoder.decode(output.logits, window_loc.start, window_loc.end, x)
-            # update the kv-cache with the data from the current window.
-            if self.update_kv_with_block:
-                kv_cache.update(output.past_key_values, window_loc.start, window_loc.end)
-            self.num_forwards += 1
+                if self.update_kv_with_block:
+                    kv_cache.update(out_step.past_key_values, left_start, right_end)
 
-            # TODO(zhengda) we need to support the expansion of the sequence.
+                iter_in_block += 1
+
+            if self.early_stop and torch.any(x[block_start:block_end] == self.decoder.eos_id):
+                x[block_end:] = self.decoder.eos_id
+                break
 
         logger.info(f'The number of diffusion iterations with kv-cache: {self.num_forwards}')
         return x.get_generated_tokens()

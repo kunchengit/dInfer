@@ -5,7 +5,6 @@ import torch.nn.functional as F
 import os
 from transformers import AutoTokenizer, AutoModel
 
-
 import torch.distributed as dist
 
 import time
@@ -20,7 +19,7 @@ def setup_distributed(rank, world_size):
     print(f'rank={rank}, world size={world_size}')
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True):
+def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True, sliding=False, prefix_look=0, after_look=0):
     device = model.device
     input_ids = tokenizer(prompt)['input_ids']
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
@@ -71,7 +70,6 @@ def main(world_size, rank, gpu_id, args):
         model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
         if world_size>1:
             model.tensor_parallel(rank, world_size)
-            
         model = model.to(torch.bfloat16)
         model = model.to(device)
         model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
@@ -87,15 +85,14 @@ def main(world_size, rank, gpu_id, args):
         m = [{"role": "user", "content": prompt}, ]
         prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
         benchmark_gen(rank, model, tokenizer, prompt, args.total_len, args.block_length, args.threshold, args.cache,
-                num_test_iter=args.num_test_iter, have_warmup=True)
+                num_test_iter=args.num_test_iter, have_warmup=True, sliding=args.sliding, prefix_look=args.prefix_look, after_look=args.after_look)
     else:
         with open(args.input_data, 'r') as f:
-            # Parsing the JSON file into a Python dictionary
             data = json.load(f)
         res_list = []
         for prompt in data:
             tps = benchmark_gen(rank, model, tokenizer, prompt, args.total_len, args.block_length, args.threshold, args.cache,
-                    num_test_iter=args.num_test_iter, have_warmup=False)
+                    num_test_iter=args.num_test_iter, have_warmup=False, sliding=args.sliding, prefix_look=args.prefix_look, after_look=args.after_look)
             res_list.append(tps)
         import statistics
         print(statistics.mean(res_list))
@@ -121,6 +118,9 @@ if __name__ == '__main__':
     parser.add_argument('--cache', type=str, default='')
     parser.add_argument('--block_diffusion', action='store_true')
     parser.add_argument('--tp', action='store_true')
+    parser.add_argument('--sliding', action='store_true')
+    parser.add_argument('--prefix_look', type=int, default=0)
+    parser.add_argument('--after_look', type=int, default=0)
     args = parser.parse_args()
     procs = []
     print(args)
