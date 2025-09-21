@@ -20,8 +20,10 @@ from llada.decoding.parallel_strategy import ThresholdParallelDecoder, Hierarchy
 # from llada.decoding.parallel_hierarchy import HierarchyDecoder
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-model_path = "/mnt/dllm/model_hub/LLaDA-1.5/"
-moe_model_path = '/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_15t_0827_500B_further_8k_enneal_train_4k_ep3_v7_1e-5/step45567_converted_hf_fusemoe'
+#model_path = "/mnt/dllm/model_hub/LLaDA-1.5/"
+model_path = "/data/myx/llm/vllm/model/LLaDA-1_5/"
+#moe_model_path = '/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_15t_0827_500B_further_8k_enneal_train_4k_ep3_v7_1e-5/step45567_converted_hf_fusemoe'
+moe_model_path = '/data/dulun/models/llada-moe-sft-model/sft_ding_8k_660w_cos_bsz1024_v3_ckpt32345'
 
 def test_block_iterator():
     prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
@@ -85,7 +87,8 @@ def test_moe_diffusion():
     torch.cuda.set_device(0)
     device = torch.device(0)
 
-    decoder = ThresholdParallelDecoder(0, threshold=0.9, early_stop=False, mask_id=156895, eos_id=156892, use_float64=True)
+    decoder = ThresholdParallelDecoder(0, threshold=0.9, mask_id=156895, eos_id=156892, use_float64=True)
+    h_decoder = HierarchyDecoder(0, threshold=0.9, mask_id=156895, eos_id=156892, low_threshold=0.4)
     tokenizer = AutoTokenizer.from_pretrained(moe_model_path, trust_remote_code=True)
     prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
     m = [{"role": "user", "content": prompt}, ]
@@ -111,7 +114,7 @@ def test_moe_diffusion():
 
         # Test generation without cache.
         print('Test block-wise diffusion LLM without KV-cache')
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
         res = dllm._generate(input_ids, gen_length=128, block_length=32)
         res1, nfe = generate(model, input_ids, gen_length=128, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892)
         res1 = res1[res1 != 156892]
@@ -120,9 +123,19 @@ def test_moe_diffusion():
 
         # Test generation with dual cache
         print('Test block-wise diffusion LLM with dual KV-cache')
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True, cache_factory=KVCacheFactory('dual'))
         res = dllm._generate(input_ids, gen_length=256, block_length=32)
         res1, nfe = generate_with_dual_cache(model, input_ids, gen_length=256, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892)
+        res1 = res1[res1 != 156892]
+        assert len(res) == len(res1)
+        assert torch.all(res == res1)
+
+        # Test generation without cache.
+        print('Test block-wise hierarchical diffusion LLM without KV-cache')
+        dllm = BlockWiseDiffusionLLM(model, h_decoder, BlockIteratorFactory(), early_stop=True)
+        res = dllm._generate(input_ids, gen_length=128, block_length=32)
+        res1, nfe = generate_hierarchy(model, input_ids, gen_length=128, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892,decoding='hierarchy_fast_v2',
+                                        low_threshold=0.4, remask_threshold=0.4)
         res1 = res1[res1 != 156892]
         assert len(res) == len(res1)
         assert torch.all(res == res1)
@@ -136,7 +149,7 @@ def test_diffusion():
     model = model.to(device)
     fastdllm_model = LLaDAModelLM_fastdllm.from_pretrained(model_path, torch_dtype=torch.bfloat16, config=config).eval()
     fastdllm_model = fastdllm_model.to(device)
-    decoder = ThresholdParallelDecoder(0, threshold=0.9, use_float64=True, early_stop=False)
+    decoder = ThresholdParallelDecoder(0, threshold=0.9, use_float64=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
@@ -156,7 +169,7 @@ def test_diffusion():
 
     # Test generation without cache.
     print('Test block-wise diffusion LLM without KV-cache')
-    dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
+    dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
     res = dllm._generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate(fastdllm_model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
@@ -165,7 +178,7 @@ def test_diffusion():
 
     # Test generation with prefix cache
     print('Test block-wise diffusion LLM with prefix KV-cache')
-    dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
+    dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True, cache_factory=KVCacheFactory('prefix'))
     res = dllm._generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_with_prefix_cache(fastdllm_model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
@@ -174,7 +187,7 @@ def test_diffusion():
 
     # Test generation with dual cache
     print('Test block-wise diffusion LLM with dual KV-cache')
-    dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+    dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('dual'), early_stop=True)
     res = dllm._generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_with_dual_cache(fastdllm_model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
@@ -289,44 +302,6 @@ def test_diffusion_sp():
         p.start()
     for p in procs:
         p.join()
-def test_moe_diffusion_hierarchy():
-    torch.cuda.set_device(0)
-    device = torch.device(0)
-
-    # decoder = ThresholdParallelDecoder(0, threshold=0.9, early_stop=False, mask_id=156895, eos_id=156892, use_float64=True)
-    decoder = HierarchyDecoder(0, steps=128, threshold=0.9, early_stop=False, mask_id=156895, eos_id=156892, low_threshold=0.4)
-    tokenizer = AutoTokenizer.from_pretrained(moe_model_path, trust_remote_code=True)
-    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
-    m = [{"role": "user", "content": prompt}, ]
-    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
-    input_ids = tokenizer(prompt)['input_ids']
-    batch_size = 1
-    input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
-
-    from vllm import distributed
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12346'
-    distributed.init_distributed_environment(1, 0, 'env://', 0, 'nccl')
-    distributed.initialize_model_parallel(1, backend='nccl')
-    print("[Loading model]")
-    # setup EP
-    parallel_config = ParallelConfig(enable_expert_parallel = True)
-    with set_current_vllm_config(VllmConfig(parallel_config = parallel_config)):
-        model_config = AutoConfig.from_pretrained(moe_model_path, trust_remote_code=True)
-        model = FusedOlmoeForCausalLM(config=model_config).eval()
-        model.load_weights(moe_model_path, torch_dtype=torch.bfloat16)
-        tokenizer = AutoTokenizer.from_pretrained(moe_model_path, trust_remote_code=True)
-        model = model.to(device)
-
-        # Test generation without cache.
-        print('Test block-wise diffusion LLM without KV-cache')
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
-        res = dllm._generate(input_ids, gen_length=128, block_length=32)
-        res1, nfe = generate_hierarchy(model, input_ids, gen_length=128, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892,decoding='hierarchy_fast_v2', 
-                                        low_threshold=0.4, remask_threshold=0.4)
-        res1 = res1[res1 != 156892]
-        assert len(res) == len(res1)
-        assert torch.all(res == res1)
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
@@ -339,4 +314,3 @@ if __name__ == '__main__':
 
     test_dist()
     test_diffusion_sp()
-    test_moe_diffusion_hierarchy()

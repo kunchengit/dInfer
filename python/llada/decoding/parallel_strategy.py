@@ -297,10 +297,9 @@ class ThresholdParallelDecoder(ParallelDecoder):
     The decoder decodes a token when its confidence score is larger than a threshold.
     """
     def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336, eos_id=126081,
-            early_stop=False, use_float64=False, num_mini_transfer_tokens=1):
+            use_float64=False, num_mini_transfer_tokens=1):
         super().__init__(temperature, remasking, mask_id)
         self.threshold = threshold
-        self.early_stop = early_stop
         self.eos_id = eos_id
         self.use_float64 = use_float64
         self.num_mini_transfer_tokens = num_mini_transfer_tokens
@@ -317,14 +316,6 @@ class ThresholdParallelDecoder(ParallelDecoder):
         transfer_index = torch.logical_and(transfer_index, mask_index)
         assert transfer_index.dtype == torch.bool
         x[block_start:block_end] = torch.where(transfer_index, x0, curr_x)
-        # If we want to have early stop and there is an EOS decoded in the current block.
-        # TODO(zhengda) the code below is not well tested in the unit test.
-        if self.early_stop and torch.any(x[block_start:block_end] == self.eos_id):
-            # Find the first location of EOS and set all tokens after the location to EOS.
-            # Here we assume that don't perform remasking.
-            # TODO(zhengda) here we assume the batch size is 1.
-            idx = int(torch.nonzero(x0[0] == self.eos_id)[0])
-            x[(block_start + idx):] = self.eos_id
 
 class FixedParallelDecoder(ParallelDecoder):
     """ This decoder decodes tokens in a fixed number of steps.
@@ -355,25 +346,22 @@ class FixedParallelDecoder(ParallelDecoder):
 class HierarchyDecoder(ParallelDecoder):
     """ This decoder decodes tokens in a hierarchy way. Forcing LLMs to decode tokens seperately.
     """
-    def __init__(self, temperature, steps, remasking='low_confidence', early_stop=True, 
+    def __init__(self, temperature, remasking='low_confidence',
                 mask_id=126336,  eos_id=126081, 
                 threshold=None, low_threshold=0.4):
         super().__init__(temperature, remasking, mask_id)
-        self.steps = steps
         self.iter = 0
         self.mask_id = mask_id
         self.eos_id=eos_id
         self.threshold=threshold
         self.low_threshold=low_threshold
-        self.early_stop=early_stop
-        
-    def get_transfer_index(self, logits,  mask_index, num_transfer_tokens, **kwargs):
+
+    def get_transfer_index(self, logits,  mask_index, **kwargs):
     
         B, L = mask_index.shape
 
         # TODO(DuLun): support batch size > 1
         assert B == 1
-        assert num_transfer_tokens is None
 
         device = logits.device
         
@@ -421,8 +409,6 @@ class HierarchyDecoder(ParallelDecoder):
     def block_init(self, block_x, block_id):
         # TODO(zhengda) we need to handle steps correctly here when the distributed version changes the gen length.
         block_mask_index = block_x == self.mask_id
-        self.num_transfer_tokens = get_num_transfer_tokens(block_mask_index, self.steps)
-        # self.num_transfer_tokens=None
         self.iter = 0
 
     def decode(self, logits, block_start, block_end, x):
@@ -432,6 +418,6 @@ class HierarchyDecoder(ParallelDecoder):
         assert mask_index.shape[1] == logits.shape[1]
 
         curr_x = x[block_start:block_end]
-        x0, transfer_index = self.get_transfer_index(logits, mask_index, num_transfer_tokens=None)
+        x0, transfer_index = self.get_transfer_index(logits, mask_index)
         self.iter += 1
         x[block_start:block_end][transfer_index] = x0[transfer_index]

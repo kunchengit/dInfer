@@ -72,13 +72,14 @@ class BlockWiseDiffusionLLM:
     in the block before moving to the next block.
     This is a classifical dLLM decoding algorithm.
     """
-    def __init__(self, model, decoder, iterator_factory, cache_factory=None):
+    def __init__(self, model, decoder, iterator_factory, early_stop=True, cache_factory=None):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
         self.iterator_factory = iterator_factory
         self.num_forwards = 0
         self.cache_updates = 0
+        self.early_stop = early_stop
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
@@ -118,6 +119,13 @@ class BlockWiseDiffusionLLM:
                 self.num_forwards += 1
                 self.decoder.decode(logits, block_loc.start, block_loc.end, x)
                 iter_no += 1
+
+            if self.early_stop and torch.any(x[block_loc.start:block_loc.end] == self.decoder.eos_id):
+                # Find the first location of EOS and set all tokens after the location to EOS.
+                # Here we assume that don't perform remasking.
+                # TODO(zhengda) here we assume the batch size is 1.
+                x[block_loc.end:] = self.decoder.eos_id
+                break
 
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
         return x.get_generated_tokens()
