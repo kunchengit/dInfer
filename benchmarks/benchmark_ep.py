@@ -13,10 +13,9 @@ from vllm.config import VllmConfig, set_current_vllm_config, get_current_vllm_co
 from vllm.forward_context import set_forward_context
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-from llada.model.modeling_fused_olmoe import FusedOlmoeForCausalLM
-from llada.decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
-from llada.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory, gather_sequence_block, BlockLoc
-from llada.decoding import ThresholdParallelDecoder
+from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
+from dinfer.decoding.utils import BlockIteratorFactory, KVCacheFactory
+from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM
 
 def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True):
     device = model.device
