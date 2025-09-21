@@ -28,13 +28,13 @@ def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshol
     print('prompt len:', input_ids.shape[1], ', total len:', input_ids.shape[1] + gen_len)
     prompt_shape = input_ids.shape
 
-    decoder = ThresholdParallelDecoder(0, threshold=threshold, early_stop=True)
+    decoder = ThresholdParallelDecoder(0, threshold=threshold)
     if cache == 'prefix':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('prefix'), early_stop=True)
     elif cache == 'dual':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('dual'), early_stop=True)
     else:
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
 
     # warm up
     if have_warmup:
