@@ -19,13 +19,14 @@ def setup_distributed(rank, world_size):
     print(f'rank={rank}, world size={world_size}')
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True, sliding=False, prefix_look=0, after_look=0):
+def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshold, cache,
+                  num_test_iter=1, have_warmup=True, sliding=False, prefix_look=0, after_look=0,
+                  warmup_steps=1):
     device = model.device
     input_ids = tokenizer(prompt)['input_ids']
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
     gen_len = total_len - input_ids.shape[1]
     print('prompt len:', input_ids.shape[1], ', total len:', input_ids.shape[1] + gen_len)
-    prompt_shape = input_ids.shape
 
     decoder = ThresholdParallelDecoder(0, threshold=threshold)
     if cache == 'prefix':
@@ -35,10 +36,9 @@ def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshol
     else:
         dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
 
-    # warm up
     if have_warmup:
-        for i in range(2):
-            out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_len)
+        for _ in range(2):
+            _ = dllm._generate(input_ids, gen_length=gen_len, block_length=block_len)
 
     dist.barrier()
     prev_forwards = dllm.num_forwards
@@ -72,11 +72,16 @@ def main(world_size, rank, gpu_id, args):
             model.tensor_parallel(rank, world_size)
         model = model.to(torch.bfloat16)
         model = model.to(device)
-        model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
+        if not args.sliding:
+            model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
     else:
         from dinfer.model.modeling_llada import LLaDAModelLM
         model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
-        model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
+        if not args.sliding:
+            model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
+
+
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     model = model.to(device)
 
@@ -85,14 +90,18 @@ def main(world_size, rank, gpu_id, args):
         m = [{"role": "user", "content": prompt}, ]
         prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
         benchmark_gen(rank, model, tokenizer, prompt, args.total_len, args.block_length, args.threshold, args.cache,
-                num_test_iter=args.num_test_iter, have_warmup=True, sliding=args.sliding, prefix_look=args.prefix_look, after_look=args.after_look)
+                num_test_iter=args.num_test_iter, have_warmup=True, sliding=args.sliding,
+                prefix_look=args.prefix_look, after_look=args.after_look,
+                warmup_steps=args.warmup_steps)
     else:
         with open(args.input_data, 'r') as f:
             data = json.load(f)
         res_list = []
         for prompt in data:
             tps = benchmark_gen(rank, model, tokenizer, prompt, args.total_len, args.block_length, args.threshold, args.cache,
-                    num_test_iter=args.num_test_iter, have_warmup=False, sliding=args.sliding, prefix_look=args.prefix_look, after_look=args.after_look)
+                    num_test_iter=args.num_test_iter, have_warmup=False, sliding=args.sliding,
+                    prefix_look=args.prefix_look, after_look=args.after_look,
+                    warmup_steps=args.warmup_steps)
             res_list.append(tps)
         import statistics
         print(statistics.mean(res_list))
@@ -121,6 +130,7 @@ if __name__ == '__main__':
     parser.add_argument('--sliding', action='store_true')
     parser.add_argument('--prefix_look', type=int, default=0)
     parser.add_argument('--after_look', type=int, default=0)
+    parser.add_argument('--warmup_steps', type=int, default=1)
     args = parser.parse_args()
     procs = []
     print(args)
