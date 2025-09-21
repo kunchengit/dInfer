@@ -180,16 +180,23 @@ class BlockIterator:
         self.iter = 0
         self.block_length = block_length
         self.start_block_align = start_block_align
+        if start_block_align:
+            self.first_block_start = self._get_first_block_start()
+        else:
+            self.first_block_start = self.x.prompt.shape[1]
+
+    def _get_first_block_start(self):
+        gen_len = self.x.total_length - self.x.prompt.shape[1]
+        left_align = ((gen_len + self.block_length - 1) // self.block_length) * self.block_length - gen_len
+        print(f'left align: {left_align}')
+        return self.x.prompt.shape[1] - left_align
 
     def __iter__(self):
         self.iter = 0
         return self
 
     def __next__(self):
-        if self.start_block_align:
-            current_block_start = (self.x.prompt.shape[1] // self.block_length) * self.block_length + self.iter * self.block_length
-        else:
-            current_block_start = self.x.prompt.shape[1] + self.iter * self.block_length
+        current_block_start = self.first_block_start + self.iter * self.block_length
         if current_block_start >= self.x.total_length:
             raise StopIteration
         current_block_end = min(current_block_start + self.block_length, self.x.total_length)
@@ -213,8 +220,11 @@ class BlockIteratorFactory:
     -------
     BlockIterator : the block iterator.
     """
+    def __init__(self, start_block_align=False):
+        self._start_block_align = start_block_align
+
     def create(self, x, block_length):
-        return BlockIterator(x, block_length)
+        return BlockIterator(x, block_length, start_block_align=self._start_block_align)
 
 class KVCache:
     """ The KV-cache

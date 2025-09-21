@@ -29,7 +29,8 @@ bucket_size = 8
 used_buckets = []
 
 def get_bucket_length(length):
-    bucket_length = bucket_size*((length+bucket_size-1)//bucket_size)
+    #bucket_length = bucket_size*((length+bucket_size-1)//bucket_size)
+    bucket_length = bucket_size*(length//bucket_size)
     if bucket_length not in used_buckets:
         used_buckets.append(bucket_length)
     return bucket_length
@@ -116,13 +117,13 @@ def main(world_size, rank, gpu_id, args):
         model.forward = torch.compile(model.forward, mode='reduce-overhead', fullgraph=False, dynamic=True)
         model = model.to(device)
 
-        decoder = ThresholdParallelDecoder(0, threshold=args.threshold, early_stop=True, mask_id=156895, eos_id=156892)
+        decoder = ThresholdParallelDecoder(0, threshold=args.threshold, mask_id=156895, eos_id=156892)
         if args.cache == 'prefix':
-            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('prefix'))
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=KVCacheFactory('prefix'), early_stop=True)
         elif args.cache == 'dual':
-            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), KVCacheFactory('dual'))
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=KVCacheFactory('dual'), early_stop=True)
         else:
-            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory())
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), early_stop=True)
         warmup_cudagraph(rank, device, dllm, args)
 
         outputs = []
@@ -148,11 +149,13 @@ def main(world_size, rank, gpu_id, args):
             sample_time = inner_stop - inner_start
             outputs.append(out)
             total_forward += nfe
-            token_number = len(out)
+            token_number = len(out[input_ids.shape[1]:])
             token_numbers.append(token_number)
             tpf = token_number/nfe
             tps = token_number/sample_time
             fps = nfe/sample_time
+            if rank == 0:
+                print(f'iter={i}, fps={fps}, nfe={nfe}')
             tpfs.append(tpf)
             tpss.append(tps)
             fpss.append(fps)
@@ -165,7 +168,7 @@ def main(world_size, rank, gpu_id, args):
             answers = []
             for i in tqdm.trange(len(outputs)):
                 out = outputs[i]
-                answer = (tokenizer.decode(out, skip_special_tokens=True))
+                answer = (tokenizer.decode(out[all_input_ids[i].shape[1]:], skip_special_tokens=True))
                 answers.append(answer)
             print(f'Forward: {total_forward}, Time: {stop-start}, FPS: {total_forward/(stop-start)}({np.mean(fpss)}), TPS: {total_token/(stop-start)}({np.mean(tpss)}), TPF: {total_token/total_forward}({np.mean(tpfs)})')
             filename = args.output_dir+'/'+'_'.join([str(item) for item in [args.exp_name, dataset_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look]])+'.jsonl'
@@ -175,7 +178,7 @@ def main(world_size, rank, gpu_id, args):
                     prompt = prompts[i]
                     answer = answers[i]
                     id = ids[i]
-                    json.dump({'id':id, 'question':question, 'prompt':prompt, 'answer': answer, 'generated_length': token_numbers[i], 'tpf':tpfs[i], 'tps':tpss[i], 'fps':fpss[i], }, f)
+                    json.dump({'id':id, 'question':question, 'prompt':prompt, 'answer': answer, 'generated_length': token_numbers[i], 'tpf':tpfs[i], 'tps':tpss[i], 'fps':fpss[i], }, f, indent=4)
                     f.write('\n')
             with open('results.txt', 'a+') as f:
                 print(args.exp_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look, total_forward, stop-start, total_token / len(all_input_ids), total_forward/(stop-start), total_token/(stop-start), total_token/total_forward, sum(padded_gen_lens)/total_forward, np.mean(fpss), np.mean(tpss), np.mean(tpfs), args.dataset, file=f)
@@ -189,14 +192,14 @@ if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, default='/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_15t_0827_500B_further_8k_enneal_train_4k_ep3_v7_1e-5/step45567_converted_hf_fusemoe')
-    parser.add_argument('--dataset', type=str, default='/mnt/dllm/myx/dumped_prompts/openai_humaneval.json')
+    parser.add_argument('--dataset', type=str, default='/mnt/dllm/myx/dumped_prompts/IFEval.json')
     parser.add_argument('--gpu', type=str, default='0,1,2,3')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--gen_len', type=int, default=1024)
     parser.add_argument('--prefix_look', type=int, default=64)
     parser.add_argument('--after_look', type=int, default=16)
     parser.add_argument('--block_length', type=int, default=64)
-    parser.add_argument('--threshold', type=float, default=0.7)
+    parser.add_argument('--threshold', type=float, default=0.9)
     parser.add_argument('--warmup_times', type=int, default=0)
     parser.add_argument('--low_threshold', type=float, default=0.3)
     parser.add_argument('--parallel_decoding', type=str, default='hierarchy_faster')

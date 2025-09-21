@@ -146,7 +146,6 @@ def main(world_size, rank, gpu_id, args):
             tpss.append(tps)
             fpss.append(fps)
             total_token += token_number
-
             if rank==0:
                 print(f"sample {i}, time: {sample_time}, generated: {token_number}, tpf: {tpf}, tps: {tps}, fps: {fps}")
                 print(f'Forward: {total_forward}, Time: {time.time()-start}, FPS: {total_forward/(time.time()-start)}({np.mean(fpss)}), TPS: {total_token/(time.time()-start)}({np.mean(tpss)}), TPF: {total_token/total_forward}({np.mean(tpfs)})')
