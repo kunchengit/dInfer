@@ -73,7 +73,7 @@ if is_flash_attn_2_available():
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
 from torch.nn.modules.normalization import RMSNorm
-
+import torch.distributed as dist
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "OlmoeConfig"
@@ -113,6 +113,141 @@ def replace_linear_class(
 
 OlmoeRMSNorm = RMSNorm
 ALL_LAYERNORM_LAYERS.append(OlmoeRMSNorm)
+
+def _all_gather_cat(
+    tensor: torch.Tensor,
+    dim: int = 1,
+    group: Optional[dist.ProcessGroup] = None,
+    normal_len: int = 0,
+    last_len: int = 0,
+) -> torch.Tensor:
+    """
+    Gather tensors along `dim` from all ranks and concatenate them.
+    Only the last chunk may be shorter than `normal_len`; all others are exactly `normal_len`.
+
+    Args:
+        tensor: local tensor on current rank
+        dim: dimension along which to concatenate
+        normal_len: length of the first (world_size-1) ranks along `dim`
+        last_len: length of the last rank along `dim`
+
+    Returns:
+        Concatenated tensor of shape [total_len, ...] along `dim`
+    """
+    world_size = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+    if world_size == 1:
+        return tensor
+
+    # 1. Move the concatenation dimension to 0 for easier all_gather
+    tensor = tensor.movedim(dim, 0)          # [L_local, ...]
+    L_local = tensor.size(0)
+
+    # 2. Compute global length across all ranks
+    total_len = normal_len * (world_size - 1) + last_len
+
+    # 3. Pre-allocate receive buffers (same shape for all ranks, sized for the largest chunk)
+    max_len = max(normal_len, last_len)
+    gather_list = [
+        torch.empty([max_len] + list(tensor.shape[1:]),
+                   dtype=tensor.dtype,
+                   device=tensor.device)
+        for _ in range(world_size)
+    ]
+
+    # 4. Copy local data into the corresponding buffer (only first L_local rows are valid)
+    gather_list[rank][:L_local] = tensor
+
+    # 5. All-gather (communicate only valid parts)
+    dist.all_gather(gather_list, gather_list[rank], group=group)
+
+    # 6. Trim padding and concatenate
+    gathered = torch.cat(gather_list, dim=0)[:total_len]
+
+    # 7. Move dimension back to original position
+    return gathered.movedim(0, dim)
+
+
+class H2Embed:
+    def __init__(self, embedding: nn.Embedding, tau: float = 1.0):
+        """
+        W_e : token embedding weights [V, d]
+        tau : temperature; lower values yield sharper distributions
+        """
+        self.embedding = embedding
+        self.W_e = embedding.weight
+        self.tau = tau
+        self.sp_size = 1  # no sequence parallel by default
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        mask_index: Optional[torch.Tensor] = None,
+        logits: Optional[torch.Tensor] = None,
+        iter_cont_weight: float = 0.0
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: [B, L] token ids
+            mask_index: [B, L] bool tensor, True where continuous embedding should be used
+            logits: [B, L, V] logits used to produce continuous embeddings
+            iter_cont_weight: blending weight between continuous and discrete embeddings
+
+        Returns:
+            Embedded representations [B, L, d]
+        """
+        rank = get_tensor_model_parallel_rank()
+        world_size = get_tensor_model_parallel_world_size()
+        seq_len = x.shape[1]
+
+        # If sequence parallel is enabled, each rank handles a slice of the sequence
+        if self.sp_size > 1:
+            normal_seq_len = (seq_len + self.sp_size - 1) // self.sp_size
+            last_seq_len = seq_len - normal_seq_len * (self.sp_size - 1)
+
+            part_start = normal_seq_len * rank
+            part_end = min(normal_seq_len * (rank + 1), seq_len)
+            x_part = x[:, part_start:part_end]
+
+            if mask_index is not None:
+                mask_part = mask_index[:, part_start:part_end]
+                logits_part = logits[:, part_start:part_end] if logits is not None else None
+            else:
+                mask_part = None
+                logits_part = None
+        else:
+            x_part = x
+            mask_part = mask_index
+            logits_part = logits
+
+        # Base discrete embedding
+        result_part = self.embedding(x_part)
+
+        # Replace selected positions with continuous embeddings
+        if mask_part is not None and logits_part is not None:
+            prob = torch.softmax(logits_part / self.tau, dim=-1)  # [B, L_part, V]
+            input_embeds_h = prob @ self.W_e  # [B, L_part, d]
+
+            # Blend continuous and discrete embeddings
+            result_part = torch.where(
+                mask_part.unsqueeze(-1),
+                iter_cont_weight * input_embeds_h + 1 * result_part,
+                result_part
+            )
+
+        # 4. Gather and concatenate sequence slices across ranks
+        if self.sp_size > 1:
+            out = _all_gather_cat(
+                result_part,
+                dim=1,
+                group=None,
+                normal_len=normal_seq_len,
+                last_len=last_seq_len
+            )
+        else:
+            out = result_part
+
+        return out
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRotaryEmbedding with Llama->Olmoe
@@ -970,6 +1105,7 @@ class FusedOlmoeForCausalLM(OlmoePreTrainedModel):
             "layers.*.self_attn.v_proj": "colwise",
             "layers.*.self_attn.o_proj": "rowwise",
         }
+        self.init_h2e_module()
 
     def _keys_to_rename_on_load_unexpected(self):
         # 返回需要重命名的键的匹配规则（正则表达式）
@@ -1045,6 +1181,7 @@ class FusedOlmoeForCausalLM(OlmoePreTrainedModel):
     def load_weights(self, model_path, torch_dtype = torch.bfloat16):
         state_dict = self.load_sharded_safetensors(model_path)
         self.load_state_dict(state_dict, strict=False, dtype=torch_dtype)
+        self.init_h2e_module()
 
 
     def show_modules(self):
@@ -1067,6 +1204,9 @@ class FusedOlmoeForCausalLM(OlmoePreTrainedModel):
 
     def get_decoder(self):
         return self.model
+
+    def init_h2e_module(self):
+        self.h2e = H2Embed(self.model.embed_tokens, tau=1.0)
 
     @add_start_docstrings_to_model_forward(OLMOE_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=MoeCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
@@ -1182,6 +1322,7 @@ class FusedOlmoeForCausalLM(OlmoePreTrainedModel):
                         _tensor_parallel(child_module, prefix=qual_name)
                 if '.self_attn' in qual_name and len(qual_name.split('.'))==3:
                     child_module.tp_size = tp_size
+            self.h2e.sp_size = tp_size
                 # if qual_name == "transformer.ff_out":
                 #     new_module = ColumnParallelLinear(child_module.in_features, child_module.out_features, False, True, return_bias=False)
                 #     new_module.weight_loader(new_module.weight, child_module.weight)

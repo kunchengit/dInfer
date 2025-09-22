@@ -304,15 +304,17 @@ class ThresholdParallelDecoder(ParallelDecoder):
         self.use_float64 = use_float64
         self.num_mini_transfer_tokens = num_mini_transfer_tokens
 
-    def decode(self, logits, block_start, block_end, x):
+    def decode(self, logits, block_start, block_end, x, iter_threshold = None):
         """ Decode the logits in a block.
         """
+        if iter_threshold is None:
+            iter_threshold = self.threshold
         mask_index = (x[block_start:block_end] == self.mask_id)
         assert mask_index.shape[1] == logits.shape[1]
 
         curr_x = x[block_start:block_end]
         x0, transfer_index = get_transfer_index_threshold(logits, self.temperature, mask_index, curr_x,
-                self.num_mini_transfer_tokens, self.mask_id, threshold=self.threshold, use_float64=self.use_float64)
+                self.num_mini_transfer_tokens, self.mask_id, threshold=iter_threshold, use_float64=self.use_float64)
         transfer_index = torch.logical_and(transfer_index, mask_index)
         assert transfer_index.dtype == torch.bool
         x[block_start:block_end] = torch.where(transfer_index, x0, curr_x)
