@@ -119,4 +119,10 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_steps", type=int, default=1)
     parser.add_argument("--tp", action="store_true")
     args = parser.parse_args()
+<<<<<<< HEAD
     main(args)
+=======
+    main(args)
+
+
+>>>>>>> update new model
