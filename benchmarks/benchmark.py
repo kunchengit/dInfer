@@ -12,6 +12,7 @@ import tqdm
 
 from dinfer.decoding.utils import BlockIteratorFactory, KVCacheFactory
 from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM
+from dinfer.decoding.generate_uniform import SlidingWindowDiffusionLLM
 
 def setup_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
@@ -29,12 +30,20 @@ def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshol
     print('prompt len:', input_ids.shape[1], ', total len:', input_ids.shape[1] + gen_len)
 
     decoder = ThresholdParallelDecoder(0, threshold=threshold)
-    if cache == 'prefix':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('prefix'), early_stop=True)
-    elif cache == 'dual':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('dual'), early_stop=True)
+    if sliding:
+        cf_type = cache if cache in ('prefix', 'dual') else 'dual'
+        dllm = SlidingWindowDiffusionLLM(
+            model, decoder, BlockIteratorFactory(),
+            KVCacheFactory(cf_type),
+            prefix_look=prefix_look, after_look=after_look, warmup_steps=warmup_steps
+        )
     else:
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
+        if cache == 'prefix':
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('prefix'), early_stop=True)
+        elif cache == 'dual':
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('dual'), early_stop=True)
+        else:
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
 
     if have_warmup:
         for _ in range(2):
@@ -65,20 +74,14 @@ def main(world_size, rank, gpu_id, args):
     device = torch.device(gpu_id)
     setup_distributed(rank, world_size)
 
-    if args.tp:
-        from dinfer.model.modeling_llada_origin import LLaDAModelLM
-        model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
-        if world_size>1:
-            model.tensor_parallel(rank, world_size)
-        model = model.to(torch.bfloat16)
-        model = model.to(device)
-        if not args.sliding:
-            model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
-    else:
-        from dinfer.model.modeling_llada import LLaDAModelLM
-        model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
-        if not args.sliding:
-            model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
+    from dinfer.model.modeling_llada_origin import LLaDAModelLM
+    model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
+    if world_size>1:
+        model.tensor_parallel(rank, world_size)
+    model = model.to(torch.bfloat16)
+    model = model.to(device)
+    if not args.sliding:
+        model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
 
 
 
