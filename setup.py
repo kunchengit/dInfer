@@ -20,7 +20,7 @@ def find_version(*file_paths):
     raise RuntimeError("Unable to find version string.")
 
 
-VERSION = find_version('python', 'llada', '__init__.py')
+VERSION = find_version('python', 'dinfer', '__init__.py')
 
 if VERSION.endswith('dev'):
     VERSION = VERSION + datetime.today().strftime('%Y%m%d')
@@ -38,7 +38,7 @@ cmdclass = {}
 
 setup(
     # Metadata
-    name='dllminfer',
+    name='dinfer',
     version=VERSION,
     python_requires='>=3.6',
     description='Package for dLLM inference',
