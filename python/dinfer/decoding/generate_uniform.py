@@ -221,13 +221,17 @@ class BlockWiseDiffusionLLMCont(BlockWiseDiffusionLLM):
         return x.get_generated_tokens()
 
 class SlidingWindowDiffusionLLM(DiffusionLLM):
-    def __init__(self, model, decoder, iterator_factory, cache_factory, update_kv_with_block=False,
+    """ This diffusion LLM inference generates tokens in a sliding window manner.
+
+    The decoding algorithm defines a window to decode tokens in each diffusion iteration.
+    After each iteration, the decoding window may slide forward to cover more masked tokens.
+    """
+    def __init__(self, model, decoder, iterator_factory, cache_factory,
                  prefix_look=0, after_look=0, warmup_steps=1, early_stop=True):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
         self.iterator_factory = iterator_factory
-        self.update_kv_with_block = update_kv_with_block
         self.num_forwards = 0
         self.cache_updates = 0
         self.prefix_look = int(prefix_look)
@@ -237,6 +241,8 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
+        ''' Generate tokens with diffusion iterations block by block.
+        '''
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 
@@ -280,9 +286,6 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
                 offset = block_start - left_start
                 logits_block = out_step.logits[:, offset:offset + (block_end - block_start)]
                 self.decoder.decode(logits_block, block_start, block_end, x)
-
-                if self.update_kv_with_block:
-                    kv_cache.update(out_step.past_key_values, left_start, right_end)
 
                 iter_in_block += 1
 
