@@ -5,7 +5,6 @@ import torch.nn.functional as F
 import os
 from transformers import AutoTokenizer, AutoModel
 
-
 import torch.distributed as dist
 
 import time
@@ -13,6 +12,7 @@ import tqdm
 
 from dinfer.decoding.utils import BlockIteratorFactory, KVCacheFactory
 from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM
+from dinfer.decoding.generate_uniform import SlidingWindowDiffusionLLM
 
 def setup_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
@@ -20,26 +20,34 @@ def setup_distributed(rank, world_size):
     print(f'rank={rank}, world size={world_size}')
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True):
+def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshold, cache,
+                  num_test_iter=1, have_warmup=True, sliding=False, prefix_look=0, after_look=0,
+                  warmup_steps=1):
     device = model.device
     input_ids = tokenizer(prompt)['input_ids']
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
     gen_len = total_len - input_ids.shape[1]
     print('prompt len:', input_ids.shape[1], ', total len:', input_ids.shape[1] + gen_len)
-    prompt_shape = input_ids.shape
 
     decoder = ThresholdParallelDecoder(0, threshold=threshold)
-    if cache == 'prefix':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('prefix'), early_stop=True)
-    elif cache == 'dual':
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('dual'), early_stop=True)
+    if sliding:
+        cf_type = cache if cache in ('prefix', 'dual') else 'dual'
+        dllm = SlidingWindowDiffusionLLM(
+            model, decoder, BlockIteratorFactory(),
+            KVCacheFactory(cf_type),
+            prefix_look=prefix_look, after_look=after_look, warmup_steps=warmup_steps
+        )
     else:
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
+        if cache == 'prefix':
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('prefix'), early_stop=True)
+        elif cache == 'dual':
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('dual'), early_stop=True)
+        else:
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
 
-    # warm up
     if have_warmup:
-        for i in range(2):
-            out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_len)
+        for _ in range(2):
+            _ = dllm._generate(input_ids, gen_length=gen_len, block_length=block_len)
 
     dist.barrier()
     prev_forwards = dllm.num_forwards
@@ -58,7 +66,7 @@ def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshol
         print(f'Iter: {i}, Forward: {total_forward}, cache updates: {total_cache_updates}, Time: {stop-start}, FPS: {total_forward/(stop-start)}, TPS: {num_tokens/(stop-start)}')
         print(tokenizer.decode(out[input_ids.shape[1]:], skip_special_tokens=False))
     return tps
-    
+
 @ torch.no_grad()
 def main(world_size, rank, gpu_id, args):
     print('started', world_size, rank, gpu_id, args)
@@ -66,19 +74,17 @@ def main(world_size, rank, gpu_id, args):
     device = torch.device(gpu_id)
     setup_distributed(rank, world_size)
 
-    if args.tp:
-        from dinfer.model.modeling_llada_origin import LLaDAModelLM
-        model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
-        if world_size>1:
-            model.tensor_parallel(rank, world_size)
-            
-        model = model.to(torch.bfloat16)
-        model = model.to(device)
+    from dinfer.model.modeling_llada_origin import LLaDAModelLM
+    model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
+    if world_size>1:
+        model.tensor_parallel(rank, world_size)
+    model = model.to(torch.bfloat16)
+    model = model.to(device)
+    if not args.sliding:
         model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
-    else:
-        from dinfer.model.modeling_llada import LLaDAModelLM
-        model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device='cuda:'+str(gpu_id)).eval()
-        model = torch.compile(model, mode='reduce-overhead', fullgraph=True)
+
+
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     model = model.to(device)
 
@@ -87,15 +93,18 @@ def main(world_size, rank, gpu_id, args):
         m = [{"role": "user", "content": prompt}, ]
         prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
         benchmark_gen(rank, model, tokenizer, prompt, args.total_len, args.block_length, args.threshold, args.cache,
-                num_test_iter=args.num_test_iter, have_warmup=True)
+                num_test_iter=args.num_test_iter, have_warmup=True, sliding=args.sliding,
+                prefix_look=args.prefix_look, after_look=args.after_look,
+                warmup_steps=args.warmup_steps)
     else:
         with open(args.input_data, 'r') as f:
-            # Parsing the JSON file into a Python dictionary
             data = json.load(f)
         res_list = []
         for prompt in data:
             tps = benchmark_gen(rank, model, tokenizer, prompt, args.total_len, args.block_length, args.threshold, args.cache,
-                    num_test_iter=args.num_test_iter, have_warmup=False)
+                    num_test_iter=args.num_test_iter, have_warmup=False, sliding=args.sliding,
+                    prefix_look=args.prefix_look, after_look=args.after_look,
+                    warmup_steps=args.warmup_steps)
             res_list.append(tps)
         import statistics
         print(statistics.mean(res_list))
@@ -121,6 +130,10 @@ if __name__ == '__main__':
     parser.add_argument('--cache', type=str, default='')
     parser.add_argument('--block_diffusion', action='store_true')
     parser.add_argument('--tp', action='store_true')
+    parser.add_argument('--sliding', action='store_true')
+    parser.add_argument('--prefix_look', type=int, default=0)
+    parser.add_argument('--after_look', type=int, default=0)
+    parser.add_argument('--warmup_steps', type=int, default=1)
     args = parser.parse_args()
     procs = []
     print(args)
