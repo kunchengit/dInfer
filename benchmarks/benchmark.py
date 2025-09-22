@@ -57,6 +57,7 @@ def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshol
         print(f'Iter: {i}, Forward: {total_forward}, cache updates: {total_cache_updates}, Time: {stop-start}, FPS: {total_forward/(stop-start)}, TPS: {num_tokens/(stop-start)}')
         print(tokenizer.decode(out[input_ids.shape[1]:], skip_special_tokens=False))
     return tps
+
 @ torch.no_grad()
 def main(world_size, rank, gpu_id, args):
     print('started', world_size, rank, gpu_id, args)
