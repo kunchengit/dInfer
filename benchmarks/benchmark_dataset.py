@@ -121,9 +121,11 @@ def main(world_size, rank, gpu_id, args):
         else:
             cache_factory=None
         if args.cont_weight>0:
-            dllm = BlockWiseDiffusionLLMCont(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, cont_weight=args.cont_weight)
+            dllm = BlockWiseDiffusionLLMCont(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory,
+                    early_stop=True, cont_weight=args.cont_weight)
         else:
-            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True)
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory,
+                    early_stop=True)
             
         warmup_cudagraph(rank, device, dllm, args)
 
@@ -192,18 +194,18 @@ import argparse
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', type=str, default='/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_19t_500B_further_8k_anneal_train_4k_ep3_v8p5/step45567_converted_hf_fusemoe')
+    parser.add_argument('--model_name', type=str, default='/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_15t_0827_500B_further_8k_enneal_train_4k_ep3_v7_1e-5/step45567_converted_hf_fusemoe')
     parser.add_argument('--dataset', type=str, default='/mnt/dllm/myx/dumped_prompts/IFEval.json')
     parser.add_argument('--gpu', type=str, default='0,1,2,3')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--gen_len', type=int, default=1024)
-    parser.add_argument('--prefix_look', type=int, default=64)
-    parser.add_argument('--after_look', type=int, default=16)
+    parser.add_argument('--prefix_look', type=int, default=0)
+    parser.add_argument('--after_look', type=int, default=0)
     parser.add_argument('--block_length', type=int, default=64)
     parser.add_argument('--threshold', type=float, default=0.9)
     parser.add_argument('--warmup_times', type=int, default=0)
     parser.add_argument('--low_threshold', type=float, default=0.3)
-    parser.add_argument('--cont_weight', type=float, default=0.3)
+    parser.add_argument('--cont_weight', type=float, default=0)
     parser.add_argument('--parallel_decoding', type=str, default='hierarchy_faster')
     parser.add_argument('--exp_name', type=str, default='exp')
     parser.add_argument('--cache', type=str, default='')
