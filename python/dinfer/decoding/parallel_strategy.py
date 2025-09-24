@@ -262,10 +262,8 @@ class ParallelDecoder:
 
 # Parallel decoding only
 @ torch.compile(dynamic=True)
-def get_transfer_index_threshold(logits, temperature, mask_index, x, num_transfer_tokens, mask_id,
-        threshold=None, rm_mask=True, use_float64=False, **kwargs):
-    # eos_id=156892
-    # mask_id=156895
+def get_transfer_index_threshold(logits, temperature, mask_index, x, mask_id,
+        threshold, rm_mask=True, use_float64=False, **kwargs):
     logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
     x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
 
@@ -282,14 +280,8 @@ def get_transfer_index_threshold(logits, temperature, mask_index, x, num_transfe
     x0 = torch.where(mask_index, x0, x)
     confidence = torch.where(mask_index, x0_p, -np.inf)
 
-    if threshold is not None:
-        actual_threshold = (torch.max(confidence, dim=1)[0]-1e-5).clamp(-1000, threshold)
-        transfer_index = confidence >= actual_threshold
-    else:
-        topk_values, topk_indices = torch.topk(confidence, k=num_transfer_tokens, dim=1)
-        threshold = topk_values[:, -1].clamp(-1000)
-        transfer_index = confidence >= threshold
-        num_transfer_tokens = mask_index.sum(dim=1, keepdim=True)
+    actual_threshold = (torch.max(confidence, dim=1)[0]-1e-5).clamp(-1000, threshold)
+    transfer_index = confidence >= actual_threshold
     return x0, transfer_index
 
 class ThresholdParallelDecoder(ParallelDecoder):
@@ -298,12 +290,11 @@ class ThresholdParallelDecoder(ParallelDecoder):
     The decoder decodes a token when its confidence score is larger than a threshold.
     """
     def __init__(self, temperature, threshold, remasking='low_confidence', mask_id=126336, eos_id=126081,
-            use_float64=False, num_mini_transfer_tokens=1):
+            use_float64=False):
         super().__init__(temperature, remasking, mask_id)
         self.threshold = threshold
         self.eos_id = eos_id
         self.use_float64 = use_float64
-        self.num_mini_transfer_tokens = num_mini_transfer_tokens
 
     def decode(self, logits, block_start, block_end, x, iter_threshold = None):
         """ Decode the logits in a block.
@@ -315,7 +306,7 @@ class ThresholdParallelDecoder(ParallelDecoder):
 
         curr_x = x[block_start:block_end]
         x0, transfer_index = get_transfer_index_threshold(logits, self.temperature, mask_index, curr_x,
-                self.num_mini_transfer_tokens, self.mask_id, threshold=iter_threshold, use_float64=self.use_float64)
+                self.mask_id, threshold=iter_threshold, use_float64=self.use_float64)
         transfer_index = torch.logical_and(transfer_index, mask_index)
         assert transfer_index.dtype == torch.bool
         x[block_start:block_end] = torch.where(transfer_index, x0, curr_x)
