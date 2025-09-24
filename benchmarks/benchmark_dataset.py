@@ -80,7 +80,7 @@ def warmup_cudagraph(rank, device, dllm, args):
     for i in iterator:   
         offset = (offset + 1) % bucket_size
         input_ids = torch.randint(0, 140000, (1, i - args.gen_len+offset), dtype=torch.long, device=device)
-        out = dllm._generate(input_ids, gen_length=args.gen_len-offset, block_length=args.block_length)
+        dllm.generate(input_ids, gen_length=args.gen_len-offset, block_length=args.block_length)
 
 @ torch.no_grad()
 def main(world_size, rank, gpu_id, args):
@@ -160,13 +160,13 @@ def main(world_size, rank, gpu_id, args):
                 padded_gen_len = padded_gen_lens[i]
                 inner_start = time.time()
                 prev_forwards = dllm.num_forwards
-                out = dllm._generate(input_ids, gen_length=padded_gen_len, block_length=block_length)
+                out = dllm.generate(input_ids, gen_length=padded_gen_len, block_length=block_length)
                 nfe = dllm.num_forwards - prev_forwards
                 inner_stop = time.time()
                 sample_time = inner_stop - inner_start
                 outputs.append(out)
                 total_forward += nfe
-                token_number = len(out[input_ids.shape[1]:])
+                token_number = out.shape[1] - input_ids.shape[1]
                 token_numbers.append(token_number)
                 tpf = token_number/nfe
                 tps = token_number/sample_time
@@ -185,7 +185,7 @@ def main(world_size, rank, gpu_id, args):
             answers = []
             for i in tqdm.trange(len(outputs)):
                 out = outputs[i]
-                answer = (tokenizer.decode(out[all_input_ids[i].shape[1]:], skip_special_tokens=True))
+                answer = (tokenizer.decode(out[0, all_input_ids[i].shape[1]:], skip_special_tokens=True))
                 answers.append(answer)
             print(f'Forward: {total_forward}, Time: {stop-start}, FPS: {total_forward/(stop-start)}({np.mean(fpss)}), TPS: {total_token/(stop-start)}({np.mean(tpss)}), TPF: {total_token/total_forward}({np.mean(tpfs)})')
             filename = args.output_dir+'/'+'_'.join([str(item) for item in [args.exp_name, dataset_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look]])+'.jsonl'

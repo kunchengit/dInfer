@@ -76,7 +76,7 @@ def warmup_cudagraph(rank, device, dllm, args):
         iterator = used_buckets
     for i in iterator:   
         input_ids = torch.randint(0, 140000, (1, i - args.gen_len), dtype=torch.long, device=device)
-        out = dllm._generate(input_ids, gen_length=args.gen_len, block_length=args.block_length)
+        dllm.generate(input_ids, gen_length=args.gen_len, block_length=args.block_length)
 
 @ torch.no_grad()
 def main(world_size, rank, gpu_id, args):

@@ -91,8 +91,7 @@ class TokenArray:
         pass
 
     def get_generated_tokens(self):
-        # TODO(zhengda) we need to define the EOS token
-        return self.data[self.data != self.eos_id]
+        return self.data[self.data != self.eos_id].unsqueeze(0)
 
     def __getitem__(self, idx):
         return self.data[:, idx]
@@ -142,8 +141,7 @@ class DistAlignedTokenArray:
         return self.data.device
 
     def get_generated_tokens(self):
-        # TODO(zhengda) we need to define the EOS token
-        return self.data[self.data != self.eos_id]
+        return self.data[self.data != self.eos_id].unsqueeze(0)
 
     def expand(self, new_len):
         pass

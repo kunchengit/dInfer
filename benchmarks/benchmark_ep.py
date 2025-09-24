@@ -49,7 +49,7 @@ def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold,
     # warm up
     if have_warmup:
         for i in range(2):
-            out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_len)
+            dllm.generate(input_ids, gen_length=gen_len, block_length=block_len)
 
     dist.barrier()
     prev_forwards = dllm.num_forwards
@@ -57,8 +57,8 @@ def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold,
     start = time.time()
     num_tokens = 0
     for i in tqdm.trange(num_test_iter):
-        out = dllm._generate(input_ids, gen_length=gen_len, block_length=block_len)
-        num_tokens += len(out) - input_ids.shape[1]
+        out = dllm.generate(input_ids, gen_length=gen_len, block_length=block_len)
+        num_tokens += out.shape[1] - input_ids.shape[1]
     stop = time.time()
     dist.barrier()
     total_forward = dllm.num_forwards - prev_forwards
@@ -66,7 +66,7 @@ def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold,
     tps = num_tokens/(stop-start)
     if rank==0:
         print(f'Iter: {i}, Forward: {total_forward}, cache updates: {total_cache_updates}, Time: {stop-start}, FPS: {total_forward/(stop-start)}, TPS: {num_tokens/(stop-start)}')
-        print('generated results:', tokenizer.decode(out[input_ids.shape[1]:], skip_special_tokens=False))
+        print('generated results:', tokenizer.decode(out[0, input_ids.shape[1]:], skip_special_tokens=False))
     return tps
 
 @ torch.no_grad()

@@ -115,33 +115,33 @@ def test_moe_diffusion():
         # Test generation without cache.
         print('Test block-wise diffusion MOE-LLM without KV-cache')
         dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
-        res = dllm._generate(input_ids, gen_length=128, block_length=32)
+        res = dllm.generate(input_ids, gen_length=128, block_length=32)
         res1, nfe = generate(model, input_ids, gen_length=128, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892)
         res2, nfe = generate_merge(model, input_ids, None, gen_length=128, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892, parallel_decoding='threshold', early_stop=False,)
         res1 = res1[res1 != 156892]
         res2 = res2[res2 != 156892]
-        assert len(res) == len(res1)
-        assert len(res) == len(res2)
+        assert res.shape[1] == len(res1)
+        assert res.shape[1] == len(res2)
         assert torch.all(res == res1)
         assert torch.all(res == res2)
 
         # Test generation with dual cache
         print('Test block-wise diffusion MOE-LLM with dual KV-cache')
         dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True, cache_factory=KVCacheFactory('dual'))
-        res = dllm._generate(input_ids, gen_length=256, block_length=32)
+        res = dllm.generate(input_ids, gen_length=256, block_length=32)
         res1, nfe = generate_with_dual_cache(model, input_ids, gen_length=256, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892)
         res1 = res1[res1 != 156892]
-        assert len(res) == len(res1)
+        assert res.shape[1] == len(res1)
         assert torch.all(res == res1)
 
         # Test generation without cache.
         print('Test block-wise hierarchical diffusion MOE-LLM without KV-cache')
         dllm = BlockWiseDiffusionLLM(model, h_decoder, BlockIteratorFactory(), early_stop=True)
-        res = dllm._generate(input_ids, gen_length=128, block_length=32)
+        res = dllm.generate(input_ids, gen_length=128, block_length=32)
         res1, nfe = generate_hierarchy(model, input_ids, gen_length=128, block_length=32, threshold=0.9, mask_id=156895, eos_id=156892,decoding='hierarchy_fast_v2',
                                         low_threshold=0.4, remask_threshold=0.4)
         res1 = res1[res1 != 156892]
-        assert len(res) == len(res1)
+        assert res.shape[1] == len(res1)
         assert torch.all(res == res1)
 
 def test_diffusion():
@@ -165,37 +165,37 @@ def test_diffusion():
 
     print('Test sliding-window diffusion LLM with dual KV-cache')
     dllm = SlidingWindowDiffusionLLM(model, decoder, SimulateBlockIteratorFactory(), KVCacheFactory('dual'))
-    res = dllm._generate(input_ids, gen_length=128, block_length=32)
+    res = dllm.generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_with_dual_cache(fastdllm_model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
-    assert len(res) == len(res1)
+    assert res.shape[1] == len(res1)
     assert torch.all(res == res1)
 
     # Test generation without cache.
     print('Test block-wise diffusion LLM without KV-cache')
     dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
-    res = dllm._generate(input_ids, gen_length=128, block_length=32)
+    res = dllm.generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate(fastdllm_model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
-    assert len(res) == len(res1)
+    assert res.shape[1] == len(res1)
     assert torch.all(res == res1)
 
     # Test generation with prefix cache
     print('Test block-wise diffusion LLM with prefix KV-cache')
     dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True, cache_factory=KVCacheFactory('prefix'))
-    res = dllm._generate(input_ids, gen_length=128, block_length=32)
+    res = dllm.generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_with_prefix_cache(fastdllm_model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
-    assert len(res) == len(res1)
+    assert res.shape[1] == len(res1)
     assert torch.all(res == res1)
 
     # Test generation with dual cache
     print('Test block-wise diffusion LLM with dual KV-cache')
     dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('dual'), early_stop=True)
-    res = dllm._generate(input_ids, gen_length=128, block_length=32)
+    res = dllm.generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_with_dual_cache(fastdllm_model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
-    assert len(res) == len(res1)
+    assert res.shape[1] == len(res1)
     assert torch.all(res == res1)
 
 def setup_distributed(rank, world_size):
@@ -289,10 +289,10 @@ def test_diffusion_worker(rank, world_size, gpu):
     print('Test diffusion LLM without KV-cache')
     decoder = ThresholdParallelDecoder(0, threshold=0.9, use_float64=True)
     dllm = BlockWiseDiffusionLLMWithSP(rank, world_size, model, decoder, BlockIteratorFactory())
-    res = dllm._generate(input_ids, gen_length=128, block_length=32)
+    res = dllm.generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_sp(model, input_ids, rank=rank, world_size=world_size, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]
-    assert len(res) == len(res1)
+    assert res.shape[1] == len(res1)
     assert torch.all(res == res1)
 
     dist.destroy_process_group()

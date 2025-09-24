@@ -23,7 +23,7 @@ class DiffusionLLM:
     """
 
     @ torch.no_grad()
-    def _generate(self, prompt, gen_length=128, block_length=128):
+    def generate(self, prompt, gen_length=128, block_length=128):
         ''' Generate tokens with diffusion iterations.
 
         Parameters:
@@ -37,32 +37,9 @@ class DiffusionLLM:
 
         Returns
         -------
-        Torch.Tensor: the generated tokens
+        Torch.Tensor: A tensor of shape (1, L') that contains the prompt tokens and the generated tokens.
+            EOS and any tokens after EOS have been removed.
         '''
-
-    @ torch.no_grad()
-    def generate(self, prompts, gen_length=128, block_length=128):
-        """ Generate tokens with diffusion LLM on a batch of prompts.
-
-        Parameters
-        ----------
-        prompts : torch.Tensor
-            A tensor of shape (b, L) that contains the input prompts.
-        gen_length: int
-            Generated answer length.
-        block_length: int
-            Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
-
-        Returns
-        -------
-        list[Torch.Tensor]: the generated tokens
-
-        """
-        res = []
-        for prompt in prompts:
-            x = self._generate(prompt, gen_length, block_length)
-            res.append(x)
-        return res
 
 class BlockWiseDiffusionLLM:
     """ This diffusion LLM inference generates tokens block by block.
@@ -84,7 +61,7 @@ class BlockWiseDiffusionLLM:
         self.expected_tpf = expected_tpf
 
     @ torch.no_grad()
-    def _generate(self, prompt, gen_length=128, block_length=128):
+    def generate(self, prompt, gen_length=128, block_length=128):
         ''' Generate tokens with diffusion iterations block by block.
         '''
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
@@ -164,7 +141,7 @@ class BlockWiseDiffusionLLMCont(BlockWiseDiffusionLLM):
         self.expected_tpf = expected_tpf
 
     @ torch.no_grad()
-    def _generate(self, prompt, gen_length=128, block_length=128):
+    def generate(self, prompt, gen_length=128, block_length=128):
         ''' Generate tokens with diffusion iterations block by block.
         '''
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
@@ -253,7 +230,7 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
         assert cache_factory is not None, "This class requires a KV-cache."
 
     @ torch.no_grad()
-    def _generate(self, prompt, gen_length=128, block_length=128):
+    def generate(self, prompt, gen_length=128, block_length=128):
         ''' Generate tokens with diffusion iterations block by block.
         '''
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
@@ -342,7 +319,7 @@ class SlidingWindowDiffusionLLMCont(DiffusionLLM):
         assert cache_factory is not None, "This class requires a KV-cache."
 
     @ torch.no_grad()
-    def _generate(self, prompt, gen_length=128, block_length=128):
+    def generate(self, prompt, gen_length=128, block_length=128):
         ''' Generate tokens with diffusion iterations block by block.
         '''
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
@@ -441,7 +418,7 @@ class BlockWiseDiffusionLLMWithSP(DiffusionLLM):
         self.num_forwards = 0
 
     @ torch.no_grad()
-    def _generate(self, prompt, gen_length=128, block_length=128):
+    def generate(self, prompt, gen_length=128, block_length=128):
         '''
         Args:
             prompt: A tensor of shape (1, L).
