@@ -32,6 +32,7 @@ def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold,
         cache_factory=KVCacheFactory(cache)
     else:
         cache_factory=None
+
     if cont_weight>0:
         if use_sw:
             dllm = SlidingWindowDiffusionLLMCont(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, 

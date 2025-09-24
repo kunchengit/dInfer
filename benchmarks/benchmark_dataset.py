@@ -13,7 +13,7 @@ import json
 
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
 from dinfer import BlockIteratorFactory, KVCacheFactory
-from dinfer import ThresholdParallelDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont, SlidingWindowDiffusionLLM, SlidingWindowDiffusionLLMCont
+from dinfer import ThresholdParallelDecoder, HierarchyDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont, SlidingWindowDiffusionLLM, SlidingWindowDiffusionLLMCont
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
@@ -117,7 +117,10 @@ def main(world_size, rank, gpu_id, args):
         model.forward = torch.compile(model.forward, mode='reduce-overhead', fullgraph=False, dynamic=True)
         model = model.to(device)
 
-        decoder = ThresholdParallelDecoder(0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+        if args.parallel_decoding == 'threshold':
+            decoder = ThresholdParallelDecoder(0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+        else:
+            decoder = HierarchyDecoder(0, threshold=args.threshold, low_threshold=args.low_threshold, mask_id=156895, eos_id=156892)
         use_sw = args.prefix_look > 0 or args.after_look > 0 or args.warmup_times > 0
         if args.cache == 'prefix' or args.cache == 'dual':
             cache_factory=KVCacheFactory(args.cache)
@@ -204,7 +207,7 @@ import argparse
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', type=str, default='/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_15t_0827_500B_further_8k_enneal_train_4k_ep3_v7_1e-5/step45567_converted_hf_fusemoe')
+    parser.add_argument('--model_name', type=str, default='/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_19t_500B_further_8k_anneal_train_4k_ep3_v8p5/step45567_converted_hf_fusemoe')
     parser.add_argument('--dataset', type=str, default='/mnt/dllm/myx/dumped_prompts/IFEval.json')
     parser.add_argument('--gpu', type=str, default='0,1,2,3')
     parser.add_argument('--batch_size', type=int, default=1)
@@ -270,7 +273,7 @@ if __name__ == '__main__':
         args.warmup_times = 4
     elif args.config == 9:
         args.cache = 'dual'
-        args.parallel_decoding = 'hierarchy_faster'
+        args.parallel_decoding = 'threshold'
         args.prefix_look = 16
         args.after_look = 16
         args.threshold = 0.9
@@ -286,7 +289,7 @@ if __name__ == '__main__':
         args.warmup_times = 4
     elif args.config == 11:
         args.cache = 'dual'
-        args.parallel_decoding = 'hierarchy_faster'
+        args.parallel_decoding = 'threshold'
         args.prefix_look = 16
         args.after_look = 16
         args.threshold = 0.8
@@ -295,7 +298,7 @@ if __name__ == '__main__':
 
     elif args.config == 12:
         args.cache = 'dual'
-        args.parallel_decoding = 'hierarchy_faster'
+        args.parallel_decoding = 'threshold'
         args.prefix_look = 16
         args.after_look = 16
         args.threshold = 0.85
@@ -310,6 +313,23 @@ if __name__ == '__main__':
         args.threshold = 0.8
         args.warmup_times = 4
 
+    elif args.config == 14:
+        args.cache = 'dual'
+        args.parallel_decoding = 'hierarchy_faster'
+        args.prefix_look = 16
+        args.after_look = 16
+        args.threshold = 0.9
+        args.low_threshold = 0.7
+        args.warmup_times = 4
+
+    elif args.config == 15:
+        args.cache = 'dual'
+        args.parallel_decoding = 'hierarchy_faster'
+        args.prefix_look = 16
+        args.after_look = 16
+        args.threshold = 0.85
+        args.low_threshold = 0.75
+        args.warmup_times = 4
     procs = []
     print(args)
 

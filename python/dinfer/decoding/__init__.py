@@ -1,4 +1,4 @@
-from .parallel_strategy import ThresholdParallelDecoder
+from .parallel_strategy import ThresholdParallelDecoder, HierarchyDecoder
 
 from .generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, SlidingWindowDiffusionLLMCont, BlockWiseDiffusionLLMWithSP, BlockWiseDiffusionLLMCont
 

@@ -334,7 +334,7 @@ class FixedParallelDecoder(ParallelDecoder):
         self.num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
         self.iter = 0
 
-    def decode(self, logits, block_start, block_end, x):
+    def decode(self, logits, block_start, block_end, x, iter_threshold = None):
         """ Decode the logits in a block.
         """
         mask_index = (x[block_start:block_end] == self.mask_id)
@@ -359,7 +359,7 @@ class HierarchyDecoder(ParallelDecoder):
         self.threshold=threshold
         self.low_threshold=low_threshold
 
-    def get_transfer_index(self, logits,  mask_index, **kwargs):
+    def get_transfer_index(self, logits,  mask_index, iter_threshold, **kwargs):
     
         B, L = mask_index.shape
 
@@ -398,8 +398,8 @@ class HierarchyDecoder(ParallelDecoder):
 
         if self.low_threshold is not None:
             transfer_index = torch.logical_and(transfer_index, torch.gt(confidence, self.low_threshold))
-        if self.threshold is not None:
-            transfer_index = torch.logical_or(transfer_index, torch.gt(confidence, self.threshold))
+        if iter_threshold is not None:
+            transfer_index = torch.logical_or(transfer_index, torch.gt(confidence, iter_threshold))
 
         
         top1_idx = torch.argmax(confidence, dim=-1)
@@ -414,13 +414,15 @@ class HierarchyDecoder(ParallelDecoder):
         block_mask_index = block_x == self.mask_id
         self.iter = 0
 
-    def decode(self, logits, block_start, block_end, x):
+    def decode(self, logits, block_start, block_end, x, iter_threshold = None):
         """ Decode the logits in a block.
         """
+        if iter_threshold is None:
+            iter_threshold = self.threshold
         mask_index = (x[block_start:block_end] == self.mask_id)
         assert mask_index.shape[1] == logits.shape[1]
 
         curr_x = x[block_start:block_end]
-        x0, transfer_index = self.get_transfer_index(logits, mask_index)
+        x0, transfer_index = self.get_transfer_index(logits, mask_index, iter_threshold)
         self.iter += 1
         x[block_start:block_end][transfer_index] = x0[transfer_index]
