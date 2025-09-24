@@ -15,7 +15,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Modified from LLaDA repos: https://github.com/ML-GSAI/LLaDA
 
+from .configuration_llada import LLaDAConfig
 from .modeling_llada_origin import LLaDAModelLM
 from .modeling_fused_olmoe import FusedOlmoeForCausalLM
 
-__all__ = ['LLaDAConfig', 'LLaDAModelLM']
+__all__ = ['LLaDAConfig', 'LLaDAModelLM', 'FusedOlmoeForCausalLM']
