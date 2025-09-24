@@ -13,7 +13,7 @@ import json
 
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
 from dinfer.decoding.utils import BlockIteratorFactory, KVCacheFactory
-from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont
+from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont, SlidingWindowDiffusionLLM, SlidingWindowDiffusionLLMCont
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
@@ -76,9 +76,11 @@ def warmup_cudagraph(rank, device, dllm, args):
         iterator = tqdm.tqdm(used_buckets)
     else:
         iterator = used_buckets
+    offset = 0
     for i in iterator:   
-        input_ids = torch.randint(0, 140000, (1, i - args.gen_len), dtype=torch.long, device=device)
-        out = dllm._generate(input_ids, gen_length=args.gen_len, block_length=args.block_length)
+        offset = (offset + 1) % bucket_size
+        input_ids = torch.randint(0, 140000, (1, i - args.gen_len+offset), dtype=torch.long, device=device)
+        out = dllm._generate(input_ids, gen_length=args.gen_len-offset, block_length=args.block_length)
 
 @ torch.no_grad()
 def main(world_size, rank, gpu_id, args):
@@ -116,57 +118,66 @@ def main(world_size, rank, gpu_id, args):
         model = model.to(device)
 
         decoder = ThresholdParallelDecoder(0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+        use_sw = args.prefix_look > 0 or args.after_look > 0 or args.warmup_times > 0
         if args.cache == 'prefix' or args.cache == 'dual':
             cache_factory=KVCacheFactory(args.cache)
         else:
             cache_factory=None
+
         if args.cont_weight>0:
-            dllm = BlockWiseDiffusionLLMCont(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory,
-                    early_stop=True, cont_weight=args.cont_weight)
+            if use_sw:
+                dllm = SlidingWindowDiffusionLLMCont(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True, 
+                    cont_weight=args.cont_weight, prefix_look=args.prefix_look, after_look=args.after_look, warmup_steps=args.warmup_times)
+            else:
+                dllm = BlockWiseDiffusionLLMCont(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True, cont_weight=args.cont_weight)
         else:
-            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory,
-                    early_stop=True)
+            if use_sw:
+                dllm = SlidingWindowDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True, 
+                    prefix_look=args.prefix_look, after_look=args.after_look, warmup_steps=args.warmup_times)
+            else:
+                dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True)
             
         warmup_cudagraph(rank, device, dllm, args)
 
-        outputs = []
-        total_forward = 0
-        if rank==0:
-            iterator = tqdm.trange(len(all_input_ids))
-        else:
-            iterator = range(len(all_input_ids))
-        start = time.time()
-        tpfs = []
-        tpss = []
-        fpss = []
-        total_token = 0
-        token_numbers = []
-        for i in iterator:   
-            input_ids = all_input_ids[i].to(device)
-            padded_gen_len = padded_gen_lens[i]
-            inner_start = time.time()
-            prev_forwards = dllm.num_forwards
-            out = dllm._generate(input_ids, gen_length=padded_gen_len, block_length=block_length)
-            nfe = dllm.num_forwards - prev_forwards
-            inner_stop = time.time()
-            sample_time = inner_stop - inner_start
-            outputs.append(out)
-            total_forward += nfe
-            token_number = len(out[input_ids.shape[1]:])
-            token_numbers.append(token_number)
-            tpf = token_number/nfe
-            tps = token_number/sample_time
-            fps = nfe/sample_time
-            if rank == 0:
-                print(f'iter={i}, fps={fps}, nfe={nfe}')
-            tpfs.append(tpf)
-            tpss.append(tps)
-            fpss.append(fps)
-            total_token += token_number
+        for wi in range(1):
+            outputs = []
+            total_forward = 0
+            if rank==0:
+                iterator = tqdm.trange(len(all_input_ids))
+            else:
+                iterator = range(len(all_input_ids))
+            start = time.time()
+            tpfs = []
+            tpss = []
+            fpss = []
+            total_token = 0
+            token_numbers = []
+            for i in iterator:   
+                input_ids = all_input_ids[i].to(device)
+                padded_gen_len = padded_gen_lens[i]
+                inner_start = time.time()
+                prev_forwards = dllm.num_forwards
+                out = dllm._generate(input_ids, gen_length=padded_gen_len, block_length=block_length)
+                nfe = dllm.num_forwards - prev_forwards
+                inner_stop = time.time()
+                sample_time = inner_stop - inner_start
+                outputs.append(out)
+                total_forward += nfe
+                token_number = len(out[input_ids.shape[1]:])
+                token_numbers.append(token_number)
+                tpf = token_number/nfe
+                tps = token_number/sample_time
+                fps = nfe/sample_time
+                if rank == 0:
+                    print(f'iter={i}, fps={fps}, nfe={nfe}')
+                tpfs.append(tpf)
+                tpss.append(tps)
+                fpss.append(fps)
+                total_token += token_number
 
-        total_token = total_token
+            total_token = total_token
 
-        stop = time.time()
+            stop = time.time()
         if rank==0:
             answers = []
             for i in tqdm.trange(len(outputs)):
@@ -185,7 +196,6 @@ def main(world_size, rank, gpu_id, args):
                     f.write('\n')
             with open('results.txt', 'a+') as f:
                 print(args.exp_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look, total_forward, stop-start, total_token / len(all_input_ids), total_forward/(stop-start), total_token/(stop-start), total_token/total_forward, sum(padded_gen_lens)/total_forward, np.mean(fpss), np.mean(tpss), np.mean(tpfs), args.dataset, file=f)
-        # dist.destroy_process_group()
 
     
 from multiprocessing import Process
@@ -257,6 +267,47 @@ if __name__ == '__main__':
         args.after_look = 16
         args.threshold = 0.8
         args.low_threshold = 0.5
+        args.warmup_times = 4
+    elif args.config == 9:
+        args.cache = 'dual'
+        args.parallel_decoding = 'hierarchy_faster'
+        args.prefix_look = 16
+        args.after_look = 16
+        args.threshold = 0.9
+        args.low_threshold = 0.7
+        args.warmup_times = 4
+
+    elif args.config == 10:
+        args.cache = 'dual'
+        args.parallel_decoding = 'threshold'
+        args.prefix_look = 16
+        args.after_look = 16
+        args.threshold = 0.85
+        args.warmup_times = 4
+    elif args.config == 11:
+        args.cache = 'dual'
+        args.parallel_decoding = 'hierarchy_faster'
+        args.prefix_look = 16
+        args.after_look = 16
+        args.threshold = 0.8
+        args.low_threshold = 0.75
+        args.warmup_times = 4
+
+    elif args.config == 12:
+        args.cache = 'dual'
+        args.parallel_decoding = 'hierarchy_faster'
+        args.prefix_look = 16
+        args.after_look = 16
+        args.threshold = 0.85
+        args.low_threshold = 0.5
+        args.warmup_times = 4
+        
+    elif args.config == 13:
+        args.cache = 'dual'
+        args.parallel_decoding = 'threshold'
+        args.prefix_look = 16
+        args.after_look = 16
+        args.threshold = 0.8
         args.warmup_times = 4
 
     procs = []

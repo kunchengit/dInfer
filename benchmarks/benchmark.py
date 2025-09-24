@@ -39,11 +39,11 @@ def benchmark_gen(rank, model, tokenizer, prompt, total_len, block_len, threshol
         )
     else:
         if cache == 'prefix':
-            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('prefix'), early_stop=True)
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(True), cache_factory=KVCacheFactory('prefix'), early_stop=True)
         elif cache == 'dual':
-            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=KVCacheFactory('dual'), early_stop=True)
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(True), cache_factory=KVCacheFactory('dual'), early_stop=True)
         else:
-            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(True), early_stop=True)
 
     if have_warmup:
         for _ in range(2):

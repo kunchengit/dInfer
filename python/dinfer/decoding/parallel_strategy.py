@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from .utils import add_gumbel_noise, get_num_transfer_tokens
 
 @ torch.no_grad()
+@ torch.compile(dynamic=True)
 def get_transfer_index_hierarchy_fast_v2(logits, temperature, remasking, mask_index, x, num_transfer_tokens,  mask_id, threshold=None,  low_threshold = None):
     if not math.isclose(temperature, 0.0):
         logits_with_noise = add_gumbel_noise(logits, temperature=temperature)

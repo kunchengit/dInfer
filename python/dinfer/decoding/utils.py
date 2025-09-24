@@ -188,7 +188,6 @@ class BlockIterator:
     def _get_first_block_start(self):
         gen_len = self.x.total_length - self.x.prompt.shape[1]
         left_align = ((gen_len + self.block_length - 1) // self.block_length) * self.block_length - gen_len
-        print(f'left align: {left_align}')
         return self.x.prompt.shape[1] - left_align
 
     def __iter__(self):
@@ -328,15 +327,19 @@ class DiffusionKVCacheManager:
             The end of the block that is being decoded.
         """
         if self.past_key_values is None:
-            return True
+            _require_update = True
         # If self.cache_update_freq is not specified, the KV-cache is updated when we enter a new block.
         if self.cache_update_freq is None:
-            return self.block_start != block_start or self.block_end != block_end
+            _require_update = self.block_start != block_start or self.block_end != block_end
         else:
             # Otherwise, we update the KV-cache when we enter a new block or the specified number of
             # diffusion iterations is reached.
-            return iter_no % self.cache_update_freq == 0 \
+            _require_update = iter_no % self.cache_update_freq == 0 \
                     or (self.block_start != block_start or self.block_end != block_end)
+        # TODO(zhengda) change update logic to block idx
+        self.block_start = block_start
+        self.block_end = block_end
+        return _require_update
 
     def update(self, past_key_values, range_start=None, range_end=None):
         """ update the KV-cache
@@ -375,8 +378,8 @@ class DiffusionKVCacheManager:
         # The key-value cache cannot be empty.
         assert self.past_key_values is not None
 
-        self.block_start = block_start
-        self.block_end = block_end
+        # self.block_start = block_start
+        # self.block_end = block_end
         if self.cache_type == 'prefix':
             replace_position = (block_start, self.past_key_values.seq_len)
         else:

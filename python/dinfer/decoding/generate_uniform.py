@@ -144,7 +144,7 @@ class BlockWiseDiffusionLLMCont(BlockWiseDiffusionLLM):
     This is a classifical dLLM decoding algorithm.
     """
     def __init__(self, model, decoder, iterator_factory, early_stop=True, cache_factory=None, maximum_unroll=4, expected_tpf=8,
-                cont_weight=0.3, cont_weight_init=0.1, cont_weight_growth=0.02, threshold_decay=0.02):
+                cont_weight=0.3, cont_weight_init=0.15, cont_weight_growth=0.02, threshold_decay=0.02):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
@@ -236,8 +236,8 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
     The decoding algorithm defines a window to decode tokens in each diffusion iteration.
     After each iteration, the decoding window may slide forward to cover more masked tokens.
     """
-    def __init__(self, model, decoder, iterator_factory, cache_factory,
-                 prefix_look=0, after_look=0, warmup_steps=1, early_stop=True):
+    def __init__(self, model, decoder, iterator_factory, cache_factory, maximum_unroll=4, expected_tpf=8,
+                 prefix_look=0, after_look=0, warmup_steps=0, early_stop=True):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
@@ -248,6 +248,8 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
         self.after_look = int(after_look)
         self.warmup_steps = int(warmup_steps)
         self.early_stop = early_stop
+        self.maximum_unroll = maximum_unroll
+        self.expected_tpf = expected_tpf
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
@@ -262,42 +264,146 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
 
         for block_idx, (block_loc, block) in enumerate(it):
             block_start, block_end = block_loc.start, block_loc.end
-            left_start = max(prompt_len, block_start - self.prefix_look)
+            left_start = max(0, block_start - self.prefix_look)
             right_end = min(total_len, block_end + self.after_look)
-            if right_end < block_end:
-                right_end = block_end
 
             iter_in_block = 0
             while (x[block_start:block_end] == self.decoder.mask_id).sum() > 0:
-                if block_idx == 0 and iter_in_block < self.warmup_steps:
-                    out_full = self.model(x.data)
+                unroll_k = max(min((block == self.decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 1)
+                for unroll_i in range(unroll_k):
+                    if block_idx == 0 and iter_in_block < self.warmup_steps:
+                        out_full = self.model(x.data)
+                        self.num_forwards += 1
+                        self.decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x)
+                        iter_in_block += 1
+                        continue
+
+                    if kv_cache.past_key_values is None or (kv_cache.require_update(iter_in_block, block_start, block_end) and block_idx > 0):
+                        out_full = self.model(x.data, use_cache=True)
+                        self.num_forwards += 1
+                        self.decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x)
+                        kv_cache.update(out_full.past_key_values)
+                        self.cache_updates += 1
+                        iter_in_block += 1
+
+                    window_input = x.data[:, left_start:right_end]
+                    past_key_values, replace_position = kv_cache.get_key_values(left_start, right_end)
+                    out_step = self.model(
+                        window_input,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        replace_position=replace_position
+                    )
                     self.num_forwards += 1
-                    self.decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x)
+                    offset = block_start - left_start
+                    logits_block = out_step.logits[:, offset:offset + (block_end - block_start)]
+                    self.decoder.decode(logits_block, block_start, block_end, x)
+
                     iter_in_block += 1
-                    continue
 
-                if kv_cache.past_key_values is None or (kv_cache.require_update(iter_in_block, block_start, block_end) and block_idx > 0):
-                    out_full = self.model(x.data, use_cache=True)
+            if self.early_stop and torch.any(x[block_start:block_end] == self.decoder.eos_id):
+                x[block_end:] = self.decoder.eos_id
+                break
+
+        logger.info(f'The number of diffusion iterations with kv-cache: {self.num_forwards}')
+        return x.get_generated_tokens()
+
+
+class SlidingWindowDiffusionLLMCont(DiffusionLLM):
+    """ This diffusion LLM inference generates tokens in a sliding window manner.
+
+    The decoding algorithm defines a window to decode tokens in each diffusion iteration.
+    After each iteration, the decoding window may slide forward to cover more masked tokens.
+    """
+    def __init__(self, model, decoder, iterator_factory, cache_factory, maximum_unroll=4, expected_tpf=8,
+                 prefix_look=0, after_look=0, warmup_steps=0, early_stop=True, cont_weight=0.3, 
+                 cont_weight_init=0.15, cont_weight_growth=0.02, threshold_decay=0.02):
+        self.model = model
+        self.cache_factory = cache_factory
+        self.decoder = decoder
+        self.iterator_factory = iterator_factory
+        self.num_forwards = 0
+        self.cache_updates = 0
+        self.prefix_look = int(prefix_look)
+        self.after_look = int(after_look)
+        self.warmup_steps = int(warmup_steps)
+        self.early_stop = early_stop
+        self.cont_weight = cont_weight
+        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
+            self.h2e = self.model.module.h2e
+        else:
+            self.h2e = self.model.h2e
+        self.cont_weight_init = cont_weight_init
+        self.cont_weight_growth = cont_weight_growth
+        self.threshold_decay = threshold_decay
+        self.maximum_unroll = maximum_unroll
+        self.expected_tpf = expected_tpf
+
+    @ torch.no_grad()
+    def _generate(self, prompt, gen_length=128, block_length=128):
+        ''' Generate tokens with diffusion iterations block by block.
+        '''
+        x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
+        it = self.iterator_factory.create(x, block_length)
+
+        kv_cache = self.cache_factory.create()
+        prompt_len = x.prompt.shape[1]
+        total_len = x.total_length
+        inputs_embeds = self.h2e(x.data)
+        iter_no = 0
+
+        for block_idx, (block_loc, block) in enumerate(it):
+            block_start, block_end = block_loc.start, block_loc.end
+            left_start = max(0, block_start - self.prefix_look)
+            right_end = min(total_len, block_end + self.after_look)
+
+            iter_in_block = 0
+            while (x[block_start:block_end] == self.decoder.mask_id).sum() > 0:
+                unroll_k = max(min((block == self.decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 1)
+                for unroll_i in range(unroll_k):
+                    iter_cont_weight = min(self.cont_weight_init+self.cont_weight_growth*iter_no, self.cont_weight)
+                    iter_threshold = max(1-iter_no*self.threshold_decay, self.decoder.threshold)
+                    if block_idx == 0 and iter_in_block < self.warmup_steps:
+                        out_full = self.model(inputs_embeds=inputs_embeds)
+                        self.num_forwards += 1
+                        self.decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x, iter_threshold)
+                        mask_index = (x.data == self.decoder.mask_id)
+                        inputs_embeds = self.h2e(x.data, mask_index, out_full.logits, iter_cont_weight)
+                        iter_in_block += 1
+                        iter_no += 1
+                        continue
+
+                    if kv_cache.past_key_values is None or (kv_cache.require_update(iter_no, block_start, block_end) and block_idx > 0):
+                        out_full = self.model(inputs_embeds=inputs_embeds, use_cache=True)
+                        self.num_forwards += 1
+                        self.decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x, iter_threshold)
+                        mask_index = (x.data == self.decoder.mask_id)
+                        inputs_embeds = self.h2e(x.data, mask_index, out_full.logits, iter_cont_weight)
+                        kv_cache.update(out_full.past_key_values)
+                        self.cache_updates += 1
+                        iter_in_block+=1
+                        iter_no += 1
+                        continue
+
+                    iter_cont_weight = min(self.cont_weight_init+self.cont_weight_growth*iter_no, self.cont_weight)
+                    iter_threshold = max(1-iter_no*self.threshold_decay, self.decoder.threshold)
+                    past_key_values, replace_position = kv_cache.get_key_values(left_start, right_end)
+                    out_step = self.model(
+                        inputs_embeds=inputs_embeds[:, left_start:right_end],
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        replace_position=replace_position
+                    )
+
                     self.num_forwards += 1
-                    self.decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x)
-                    kv_cache.update(out_full.past_key_values)
-                    self.cache_updates += 1
+                    iter_no += 1
+                    offset = block_start - left_start
+                    logits_block = out_step.logits[:, offset:offset + (block_end - block_start)]
+                    self.decoder.decode(logits_block, block_start, block_end, x, iter_threshold)
+                    mask_index = (x.data[:, left_start:right_end] == self.decoder.mask_id)
+                    inputs_embeds[:, left_start:right_end] = self.h2e(x.data[:, left_start:right_end], mask_index, out_step.logits, iter_cont_weight)
 
-                window_input = x.data[:, left_start:right_end]
-                past_key_values, replace_position = kv_cache.get_key_values(left_start, right_end)
-                out_step = self.model(
-                    window_input,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                    replace_position=replace_position
-                )
-
-                self.num_forwards += 1
-                offset = block_start - left_start
-                logits_block = out_step.logits[:, offset:offset + (block_end - block_start)]
-                self.decoder.decode(logits_block, block_start, block_end, x)
-
-                iter_in_block += 1
+                    iter_in_block += 1
 
             if self.early_stop and torch.any(x[block_start:block_end] == self.decoder.eos_id):
                 x[block_end:] = self.decoder.eos_id

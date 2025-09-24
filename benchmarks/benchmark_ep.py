@@ -15,7 +15,7 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
 from dinfer.decoding.utils import BlockIteratorFactory, KVCacheFactory
-from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont
+from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont,SlidingWindowDiffusionLLM,SlidingWindowDiffusionLLMCont
 
 def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True, cont_weight=0.3):
     device = model.device
@@ -29,10 +29,19 @@ def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold,
         cache_factory=KVCacheFactory(cache)
     else:
         cache_factory=None
+    use_sw = True
     if cont_weight>0:
-        dllm = BlockWiseDiffusionLLMCont(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, cont_weight=cont_weight)
+        if use_sw:
+            dllm = SlidingWindowDiffusionLLMCont(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, 
+                cont_weight=cont_weight, prefix_look=16, after_look=16, warmup_steps=4)
+        else:
+            dllm = BlockWiseDiffusionLLMCont(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, cont_weight=cont_weight)
     else:
-        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True)
+        if use_sw:
+            dllm = SlidingWindowDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, 
+                prefix_look=16, after_look=16, warmup_steps=4)
+        else:
+            dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True)
 
     # warm up
     if have_warmup:
@@ -97,7 +106,7 @@ import argparse
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', type=str, default='/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_15t_0827_500B_further_8k_enneal_train_4k_ep3_v7_1e-5/step45567_converted_hf_fusemoe')
+    parser.add_argument('--model_name', type=str, default='/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_19t_500B_further_8k_anneal_train_4k_ep3_v8p5/step45567_converted_hf_fusemoe')
     parser.add_argument('--gpu', type=str, default='0,1,2,3')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--gen_len', type=int, default=256)
