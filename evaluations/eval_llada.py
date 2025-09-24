@@ -49,19 +49,15 @@ from lm_eval.api.registry import register_model
 
 
 from decoding.generate_hierarchy import generate_hierarchy
-from decoding.generate_cache import generate_with_prefixcache_update
 from decoding.generate_fastdllm import generate_fastdllm
 from decoding.generate_dist import generate_dist
-#from model.modeling_llada import LLaDAModelLM
 from model.modeling_llada_origin import LLaDAModelLM
 
 datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
 datasets.config.DOWNLOAD_TIMEOUT = 180  # 单位为秒，默认是10
 
 def decoding_mapping (decoding):
-    if decoding == "prefix_cache":
-        return generate_with_prefixcache_update
-    elif decoding in {"hierarchy_fast_v2", "hierarchy_remasking"}:
+    if decoding in {"hierarchy_fast_v2", "hierarchy_remasking"}:
         return generate_hierarchy
     elif decoding == "fastdllm":
         return generate_fastdllm

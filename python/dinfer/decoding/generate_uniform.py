@@ -250,6 +250,7 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
         self.early_stop = early_stop
         self.maximum_unroll = maximum_unroll
         self.expected_tpf = expected_tpf
+        assert cache_factory is not None, "This class requires a KV-cache."
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):
@@ -338,6 +339,7 @@ class SlidingWindowDiffusionLLMCont(DiffusionLLM):
         self.threshold_decay = threshold_decay
         self.maximum_unroll = maximum_unroll
         self.expected_tpf = expected_tpf
+        assert cache_factory is not None, "This class requires a KV-cache."
 
     @ torch.no_grad()
     def _generate(self, prompt, gen_length=128, block_length=128):

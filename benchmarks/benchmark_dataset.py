@@ -12,8 +12,8 @@ from vllm.forward_context import set_forward_context
 import json
 
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
-from dinfer.decoding.utils import BlockIteratorFactory, KVCacheFactory
-from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont, SlidingWindowDiffusionLLM, SlidingWindowDiffusionLLMCont
+from dinfer import BlockIteratorFactory, KVCacheFactory
+from dinfer import ThresholdParallelDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont, SlidingWindowDiffusionLLM, SlidingWindowDiffusionLLMCont
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 

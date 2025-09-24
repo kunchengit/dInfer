@@ -14,10 +14,10 @@ from vllm.forward_context import set_forward_context
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
-from dinfer.decoding.utils import BlockIteratorFactory, KVCacheFactory
-from dinfer.decoding import ThresholdParallelDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont,SlidingWindowDiffusionLLM,SlidingWindowDiffusionLLMCont
+from dinfer import BlockIteratorFactory, KVCacheFactory
+from dinfer import ThresholdParallelDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont,SlidingWindowDiffusionLLM, SlidingWindowDiffusionLLMCont
 
-def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold, cache, num_test_iter=1, have_warmup=True, cont_weight=0.3):
+def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold, cache, num_test_iter=1, use_sw=False, have_warmup=True, cont_weight=0.3):
     device = model.device
     input_ids = tokenizer(prompt)['input_ids']
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
@@ -25,11 +25,13 @@ def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold,
     prompt_shape = input_ids.shape
 
     decoder = ThresholdParallelDecoder(0, threshold=threshold, mask_id=156895, eos_id=156892)
+    if use_sw and cache == '':
+        # The sliding window algorithm has to be used with kv-cache.
+        cache = 'dual'
     if cache == 'prefix' or cache == 'dual':
         cache_factory=KVCacheFactory(cache)
     else:
         cache_factory=None
-    use_sw = True
     if cont_weight>0:
         if use_sw:
             dllm = SlidingWindowDiffusionLLMCont(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, 
@@ -95,7 +97,7 @@ def main(world_size, rank, gpu_id, args):
         model = model.to(device)
         prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours?"
 
-        benchmark_gen(rank, model, tokenizer, prompt, args.gen_len, args.block_length, args.threshold, args.cache, cont_weight=args.cont_weight)
+        benchmark_gen(rank, model, tokenizer, prompt, args.gen_len, args.block_length, args.threshold, args.cache, use_sw=args.sliding, cont_weight=args.cont_weight)
         
         # dist.destroy_process_group()
 
@@ -109,13 +111,14 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default='/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_19t_500B_further_8k_anneal_train_4k_ep3_v8p5/step45567_converted_hf_fusemoe')
     parser.add_argument('--gpu', type=str, default='0,1,2,3')
     parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--gen_len', type=int, default=256)
+    parser.add_argument('--gen_len', type=int, default=1024)
     parser.add_argument('--prompt_length', type=int, default=0)
-    parser.add_argument('--block_length', type=int, default=128)
+    parser.add_argument('--block_length', type=int, default=64)
     parser.add_argument('--threshold', type=float, default=0.9)
     parser.add_argument('--low_threshold', type=float, default=0.3)
-    parser.add_argument('--cont_weight', type=float, default=0.3)
-    parser.add_argument('--parallel_decoding', type=str, default='hierarchy_faster')
+    parser.add_argument('--sliding', action='store_true')
+    parser.add_argument('--cont_weight', type=float, default=0)
+    parser.add_argument('--parallel_decoding', type=str, default='threshold')
     parser.add_argument('--cache', type=str, default='')
     parser.add_argument('--use_tp', action='store_true')
     args = parser.parse_args()

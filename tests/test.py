@@ -9,20 +9,21 @@ from vllm.config import CompilationConfig, ParallelConfig
 from vllm.config import VllmConfig, set_current_vllm_config, get_current_vllm_config
 
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
+from dinfer import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
+from dinfer import ThresholdParallelDecoder, HierarchyDecoder
+
 from dinfer.model.modeling_llada_fastdllm import LLaDAModelLM as LLaDAModelLM_fastdllm
-from dinfer.decoding import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP
 from dinfer.decoding.generate_fastdllm import generate, generate_with_prefix_cache, generate_with_dual_cache
 from dinfer.decoding.generate_dist import generate as generate_sp
 from dinfer.decoding.generate_hierarchy import generate_hierarchy
 from dinfer.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory, gather_sequence_block, BlockLoc
-from dinfer.decoding.parallel_strategy import ThresholdParallelDecoder, HierarchyDecoder
 from dinfer.decoding.generate_merge import generate_merge
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 #model_path = "/mnt/dllm/model_hub/LLaDA-1.5/"
 model_path = "/data/myx/llm/vllm/model/LLaDA-1_5/"
 #moe_model_path = '/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_15t_0827_500B_further_8k_enneal_train_4k_ep3_v7_1e-5/step45567_converted_hf_fusemoe'
-moe_model_path = '/data/dulun/models/llada-moe-sft-model/sft_ding_8k_660w_cos_bsz1024_v3_ckpt32345'
+moe_model_path = '/data/dulun/models/llada-moe-sft/llada-moe-sft-model/7bA1b_anneal_19t_500B_further_8k_anneal_train_4k_ep3_v8p5/step45567_converted_hf_fusemoe/'
 
 def test_block_iterator():
     prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)

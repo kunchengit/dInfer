@@ -1,5 +1,3 @@
-
-
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -131,7 +129,10 @@ def main(world_size, rank, gpu_id, args):
         for i in iterator:   
             input_ids = all_input_ids[i]
             inner_start = time.time()
-            out, nfe = generate_fastdllm(model, input_ids, use_cache=args.cache, dual_cache=args.dual_cache, steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0., remasking='low_confidence', threshold=args.threshold, mask_id=156895, eos_id=156892, early_stop=False, parallel_decoding=args.parallel_decoding, low_threshold=args.low_threshold, prefix_look=args.prefix_look, after_look=args.after_look)
+            out, nfe = generate_fastdllm(model, input_ids, use_cache=args.cache, dual_cache=args.dual_cache,
+                    steps=gen_len//num_parallel, gen_length=gen_len, block_length=block_length, temperature=0.,
+                    remasking='low_confidence', threshold=args.threshold, mask_id=156895, eos_id=156892, early_stop=False,
+                    parallel_decoding=args.parallel_decoding)
             inner_stop = time.time()
             sample_time = inner_stop - inner_start
             outputs.append(out)
