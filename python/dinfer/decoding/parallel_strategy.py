@@ -311,6 +311,84 @@ class ThresholdParallelDecoder(ParallelDecoder):
         assert transfer_index.dtype == torch.bool
         x[block_start:block_end] = torch.where(transfer_index, x0, curr_x)
 
+class CreditThresholdParallelDecoder(ThresholdParallelDecoder):
+    """ This decoder deocdes tokens in parallel based on a threshold + credit.
+
+    The decoder decodes a token when its confidence is larger than a threshold.
+    """
+    def __init__(self, 
+                 credit_alpha=0.7, 
+                 boost_gamma=0.2, 
+                 decay_beta=0.8,
+                 **kwargs):
+        super().__init__(**kwargs)
+        
+        self.credit_alpha = credit_alpha
+        self.boost_gamma = boost_gamma
+        self.decay_beta = decay_beta
+
+        self._credit_mats = {}   
+        self._credit_iters = {}  
+
+    def _apply_credit_fusion(self, logits, mask_index, key):
+        """
+        EMA-based credit fusion (no CM, no pre-credit):
+        - Maintains a per-block CreditMatrix (EMA with decay).
+        - Accumulates enhanced top-1 probability only on masked positions.
+        - Returns fused_logits.
+        """
+        B, L, V = logits.shape
+        device = logits.device
+
+        mat = self._credit_mats.get(key, None)
+        if mat is None or mat.shape != (B, L, V) or mat.device != device:
+            mat = torch.zeros((B, L, V), dtype=torch.float32, device=device)
+            self._credit_mats[key] = mat
+            self._credit_iters[key] = 0
+
+        iter_idx = self._credit_iters[key]
+
+        if iter_idx > 0:
+            mat.mul_(self.decay_beta)
+
+        probs = F.softmax(logits.to(torch.float32), dim=-1)
+        top1_probs, top1_idx = torch.max(probs, dim=-1)         
+        enhanced = top1_probs.pow(self.boost_gamma).to(mat.dtype)  
+        update_vals = enhanced * mask_index.to(enhanced.dtype)     
+        mat.scatter_add_(2, top1_idx.unsqueeze(-1), update_vals.unsqueeze(-1))
+
+        fused_logits = logits + self.credit_alpha * torch.log(mat + 1)
+        self._credit_iters[key] = iter_idx + 1
+        return fused_logits
+
+    def decode(self, logits, block_start, block_end, x, iter_threshold = None):
+        """ Decode the logits in a block.
+        """
+        if iter_threshold is None:
+            iter_threshold = self.threshold
+        mask_index = (x[block_start:block_end] == self.mask_id)
+        assert mask_index.shape[1] == logits.shape[1]
+
+        curr_x = x[block_start:block_end]
+        key = (block_start, block_end)
+        used_logits = self._apply_credit_fusion(logits, mask_index, key)
+
+        x0, transfer_index = get_transfer_index_threshold(used_logits, self.temperature, mask_index, curr_x,
+                self.mask_id, threshold=iter_threshold, use_float64=self.use_float64)
+
+        transfer_index = torch.logical_and(transfer_index, mask_index)
+        assert transfer_index.dtype == torch.bool
+        x[block_start:block_end] = torch.where(transfer_index, x0, curr_x)
+
+        if hasattr(x, 'data'):
+            has_mask = (x.data == self.mask_id).any()
+        else:
+            has_mask = (x == self.mask_id).any() if x.dim() > 0 else (x == self.mask_id)
+
+        if not has_mask:
+            self._credit_mats.clear()
+            self._credit_iters.clear()
+
 class FixedParallelDecoder(ParallelDecoder):
     """ This decoder decodes tokens in a fixed number of steps.
     """
