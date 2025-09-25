@@ -13,7 +13,7 @@ import json
 
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
 from dinfer import BlockIteratorFactory, KVCacheFactory
-from dinfer import ThresholdParallelDecoder, HierarchyDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont, SlidingWindowDiffusionLLM, SlidingWindowDiffusionLLMCont
+from dinfer import ThresholdParallelDecoder,CreditThresholdParallelDecoder, HierarchyDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont, SlidingWindowDiffusionLLM, SlidingWindowDiffusionLLMCont
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
@@ -118,7 +118,11 @@ def main(world_size, rank, gpu_id, args):
         model = model.to(device)
 
         if args.parallel_decoding == 'threshold':
-            decoder = ThresholdParallelDecoder(0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+            if args.use_credit:
+                decoder = CreditThresholdParallelDecoder(0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+            else:
+                decoder = ThresholdParallelDecoder(0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+
         else:
             decoder = HierarchyDecoder(0, threshold=args.threshold, low_threshold=args.low_threshold, mask_id=156895, eos_id=156892)
         use_sw = args.prefix_look > 0 or args.after_look > 0 or args.warmup_times > 0
@@ -220,6 +224,7 @@ if __name__ == '__main__':
     parser.add_argument('--low_threshold', type=float, default=0.3)
     parser.add_argument('--cont_weight', type=float, default=0)
     parser.add_argument('--parallel_decoding', type=str, default='hierarchy_faster')
+    parser.add_argument('--use_credit', action='store_true')
     parser.add_argument('--exp_name', type=str, default='exp')
     parser.add_argument('--cache', type=str, default='')
     parser.add_argument('--use_tp', action='store_true')
