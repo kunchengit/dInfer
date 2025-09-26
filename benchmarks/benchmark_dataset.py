@@ -119,12 +119,12 @@ def main(world_size, rank, gpu_id, args):
 
         if args.parallel_decoding == 'threshold':
             if args.use_credit:
-                decoder = CreditThresholdParallelDecoder(0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+                decoder = CreditThresholdParallelDecoder(temperature=0, threshold=args.threshold, mask_id=156895, eos_id=156892)
             else:
-                decoder = ThresholdParallelDecoder(0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+                decoder = ThresholdParallelDecoder(temperature=0, threshold=args.threshold, mask_id=156895, eos_id=156892)
 
         else:
-            decoder = HierarchyDecoder(0, threshold=args.threshold, low_threshold=args.low_threshold, mask_id=156895, eos_id=156892)
+            decoder = HierarchyDecoder(temperature=0, threshold=args.threshold, low_threshold=args.low_threshold, mask_id=156895, eos_id=156892)
         use_sw = args.prefix_look > 0 or args.after_look > 0 or args.warmup_times > 0
         if args.cache == 'prefix' or args.cache == 'dual':
             cache_factory=KVCacheFactory(args.cache)
