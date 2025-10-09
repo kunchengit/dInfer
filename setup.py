@@ -30,7 +30,6 @@ requirements = [
     'tqdm',
     'transformers==4.53.0',
     'vllm==0.9.1',
-    'pylint',
 ]
 
 extensions = []
