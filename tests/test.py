@@ -308,7 +308,7 @@ def test_diffusion_sp():
     for p in procs:
         p.join()
 
-def test_moe_server():
+def test_moe_server(require_init=True):
     print('test serving of diffusion-MOE')
     params = SamplingParams(temperature=0, threshold=0.9, mask_id=156895, eos_id=156892, early_stop=True, cache='', cont_weight=0, enable_torch_compile=True)
 
@@ -322,18 +322,18 @@ def test_moe_server():
     llm = DiffusionLLMServing(model=moe_model_path, is_moe=True, sample_params=params, num_gpus=1)
     res = llm.generate(input_ids, gen_length=256, block_length=32)
 
-    from vllm import distributed
     device = torch.device(0)
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12347'
-    distributed.init_distributed_environment(1, 0, 'env://', 0, 'nccl')
-    distributed.initialize_model_parallel(1, backend='nccl')
-    print("[Loading model]")
-    # setup EP
-    parallel_config = ParallelConfig(enable_expert_parallel = True)
+    if require_init:
+        from vllm import distributed
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = '12347'
+        distributed.init_distributed_environment(1, 0, 'env://', 0, 'nccl')
+        distributed.initialize_model_parallel(1, backend='nccl')
 
     batch_size = 1
     decoder = ThresholdParallelDecoder(0, threshold=0.9, mask_id=156895, eos_id=156892)
+    # setup EP
+    parallel_config = ParallelConfig(enable_expert_parallel = True)
     with set_current_vllm_config(VllmConfig(parallel_config = parallel_config)):
         model_config = AutoConfig.from_pretrained(moe_model_path, trust_remote_code=True)
         model = FusedOlmoeForCausalLM(config=model_config).eval()
@@ -383,10 +383,10 @@ def test_server():
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     logging.basicConfig(level=logging.INFO)
-    test_server()
-    test_moe_server()
-    test_diffusion()
     test_moe_diffusion()
+    test_moe_server(False)
+    test_diffusion()
+    test_server()
 
     test_token_array()
     test_block_iterator()
