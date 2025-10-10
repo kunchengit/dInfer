@@ -51,7 +51,7 @@ from torch import einsum, values_copy
 from transformers import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.auto import AutoModel
-from .flash_attn_triton import FlashAttnFunc
+# from .flash_attn_triton import FlashAttnFunc
 
 from .configuration_llada import (
     LLaDAConfig,
@@ -870,13 +870,14 @@ class LLaDABlock(nn.Module):
                     dropout_p=0.0 if not self.training else self.config.attention_dropout, causal=False
             )
             return r.transpose(1, 2)
-        elif use_ring_attn:
+        # used for SP support, not available now
+        # elif use_ring_attn:
 
-            # gathered_k = torch.cat(gathered_k, dim=1)
-            # print(gathered_k.shape)
-            # print(q.shape, gathered_k.shape, gathered_v.shape)
-            att = FlashAttnFunc.apply(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
-            att = att.contiguous().view(B, T, C)
+        #     # gathered_k = torch.cat(gathered_k, dim=1)
+        #     # print(gathered_k.shape)
+        #     # print(q.shape, gathered_k.shape, gathered_v.shape)
+        #     att = FlashAttnFunc.apply(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+        #     att = att.contiguous().view(B, T, C)
         else:
             att = self._scaled_dot_product_attention(
                 q,
@@ -1796,7 +1797,6 @@ class LLaDAModelLM(PreTrainedModel):
             raise ValueError("output_attentions is not yet supported in LLaDA")
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        # import pdb; pdb.set_trace()
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model.forward(
             input_ids=input_ids,
@@ -1808,7 +1808,6 @@ class LLaDAModelLM(PreTrainedModel):
             output_hidden_states=output_hidden_states,
             replace_position=replace_position,
         )
-        # import pdb; pdb.set_trace()
         logits = outputs.logits
         hidden_states = outputs.hidden_states
 

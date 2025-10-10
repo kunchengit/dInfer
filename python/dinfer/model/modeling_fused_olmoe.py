@@ -1108,25 +1108,19 @@ class FusedOlmoeForCausalLM(OlmoePreTrainedModel):
         self.init_h2e_module()
 
     def _keys_to_rename_on_load_unexpected(self):
-        # 返回需要重命名的键的匹配规则（正则表达式）
         return [
-            # 将 w1 映射到 w13_weight
             (
                 r"^model\.layers\.(\d+)\.mlp\.w1$",
                 r"model.layers.\1.mlp.experts.w13_weight"
             ),
-            # 保持 w2 映射到 w2_weight
             (
                 r"^model\.layers\.(\d+)\.mlp\.w2$", 
                 r"model.layers.\1.mlp.experts.w2_weight"
             )
         ]
-    # 在 PreTrainedModel 内部（简化逻辑）
     def load_state_dict(self, state_dict, strict=True, dtype=torch.bfloat16):
-        # 获取需要重命名的键规则
         rename_rules = self._keys_to_rename_on_load_unexpected()
         
-        # 自动转换键名
         new_state_dict = {}
         for key, value in state_dict.items():
             new_key = key
@@ -1139,12 +1133,9 @@ class FusedOlmoeForCausalLM(OlmoePreTrainedModel):
                 ep_size = get_tensor_model_parallel_world_size()
                 size = divide(value.shape[0], ep_size)
                 new_state_dict[new_key] = value[ep_rank*size:(ep_rank+1)*size]
-            # elif 'gate' in new_key:
-            #     new_state_dict[new_key] = value
             else:
                 new_state_dict[new_key] = value
         
-        # 调用父类方法加载
         super().load_state_dict(new_state_dict, strict=strict)
         for name, param in self.named_parameters():
             if 'gate' in name:
@@ -1156,16 +1147,13 @@ class FusedOlmoeForCausalLM(OlmoePreTrainedModel):
 
 
     def load_sharded_safetensors(self, model_dir):
-        # 步骤1：读取索引文件
         index_path = Path(model_dir) / "model.safetensors.index.json"
         with open(index_path, "r") as f:
             index = json.load(f)
 
-        # 步骤2：解析权重分片信息
         weight_map = index["weight_map"]
         shard_files = {v for v in weight_map.values()}
 
-        # 步骤3：构建合并的state_dict
         state_dict = {}
         for shard in sorted(shard_files):  
             shard_path = Path(model_dir) / shard
@@ -1323,9 +1311,6 @@ class FusedOlmoeForCausalLM(OlmoePreTrainedModel):
                 if '.self_attn' in qual_name and len(qual_name.split('.'))==3:
                     child_module.tp_size = tp_size
             self.h2e.sp_size = tp_size
-                # if qual_name == "transformer.ff_out":
-                #     new_module = ColumnParallelLinear(child_module.in_features, child_module.out_features, False, True, return_bias=False)
-                #     new_module.weight_loader(new_module.weight, child_module.weight)
-                #     setattr(module, child_name, new_module)
+
                     
         _tensor_parallel(self.model)

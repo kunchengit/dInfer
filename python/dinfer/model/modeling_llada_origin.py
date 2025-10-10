@@ -1549,7 +1549,6 @@ class LLaDAModelLM(PreTrainedModel):
             raise ValueError("output_attentions is not yet supported in LLaDA")
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        # import pdb; pdb.set_trace()
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model.forward(
             input_ids=input_ids,
@@ -1561,7 +1560,6 @@ class LLaDAModelLM(PreTrainedModel):
             output_hidden_states=output_hidden_states,
             replace_position=replace_position,
         )
-        # import pdb; pdb.set_trace()
         logits = outputs.logits
         hidden_states = outputs.hidden_states
 
@@ -1640,10 +1638,7 @@ class LLaDAModelLM(PreTrainedModel):
                     _tensor_parallel(child_module, prefix=qual_name)
                 if '.blocks.' in qual_name and len(qual_name.split('.'))==3:
                     child_module.tp_size = tp_size
-                # if qual_name == "transformer.ff_out":
-                #     new_module = ColumnParallelLinear(child_module.in_features, child_module.out_features, False, True, return_bias=False)
-                #     new_module.weight_loader(new_module.weight, child_module.weight)
-                #     setattr(module, child_name, new_module)
+
                     
         _tensor_parallel(self.model)
 

@@ -1720,10 +1720,6 @@ class LLaDAModelLM(PreTrainedModel):
                     _tensor_parallel(child_module, prefix=qual_name)
                 if '.blocks.' in qual_name and len(qual_name.split('.'))==3:
                     child_module.tp_size = tp_size
-                # if qual_name == "transformer.ff_out":
-                #     new_module = ColumnParallelLinear(child_module.in_features, child_module.out_features, False, True, return_bias=False)
-                #     new_module.weight_loader(new_module.weight, child_module.weight)
-                #     setattr(module, child_name, new_module)
                     
         _tensor_parallel(self.model)
 
