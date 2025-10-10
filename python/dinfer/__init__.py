@@ -15,4 +15,6 @@ from .decoding.parallel_strategy import ThresholdParallelDecoder,CreditThreshold
 
 from .decoding.generate_uniform import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP, BlockWiseDiffusionLLMCont, SlidingWindowDiffusionLLMCont
 
+from .decoding.serving import DiffusionLLMServing, SamplingParams
+
 from .decoding.utils import BlockIteratorFactory, KVCacheFactory
