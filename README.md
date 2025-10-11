@@ -39,6 +39,48 @@ cd dInfer
 pip install .
 ```
 
+## Download from Hugging Face and convert with transfer/transfer.py
+
+This project supports using LLaDA(-MoE) checkpoints from Hugging Face. After downloading a model, run the CPU conversion script to fuse MoE experts into a single fused model that can be loaded locally.
+
+### 1) Download checkpoints
+
+```bash
+pip install -U huggingface_hub hf_transfer
+export HF_HUB_ENABLE_HF_TRANSFER=1
+
+# Example: Instruct checkpoint
+hf download inclusionAI/LLaDA-MoE-7B-A1B-Instruct \
+  --repo-type model \
+  --local-dir /path/to/LLaDA-MoE-7B-A1B-Instruct
+```
+
+### 2) Convert to fused model
+
+Use the conversion tool to fuse the experts.
+
+```bash
+# From repo root
+python transfer/transfer.py \
+  --input  /path/to/LLaDA-MoE-7B-A1B-Instruct \
+  --output /path/to/LLaDA-MoE-7B-A1B-Instruct-fused
+```
+
+After conversion:
+- The output directory will contain `modeling_fused_olmoe.py` and a `config.json` whose
+  - `architectures` includes `FusedOlmoeForCausalLM`
+  - `auto_map.AutoModelForCausalLM` points to `modeling_fused_olmoe.FusedOlmoeForCausalLM`
+
+### 3) Load the fused model
+
+- Via Auto classes:
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+m = "/path/to/LLaDA-MoE-7B-A1B-Instruct-fused"
+tok = AutoTokenizer.from_pretrained(m, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(m, trust_remote_code=True, torch_dtype="bfloat16")
+```
+
 ## Cite
 
 ```

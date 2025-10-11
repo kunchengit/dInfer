@@ -211,8 +211,8 @@ import argparse
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', type=str, default='/mnt/dllm/fengling/moe/workdir/7bA1b_anneal_19t_500B_further_8k_anneal_train_4k_ep3_v8p5/step45567_converted_hf_fusemoe')
-    parser.add_argument('--dataset', type=str, default='/mnt/dllm/myx/dumped_prompts/IFEval.json')
+    parser.add_argument('--model_name', type=str, default='')
+    parser.add_argument('--dataset', type=str, default='')
     parser.add_argument('--gpu', type=str, default='0,1,2,3')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--gen_len', type=int, default=1024)
