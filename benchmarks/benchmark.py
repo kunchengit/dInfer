@@ -12,7 +12,7 @@ import tqdm
 
 from dinfer.model import LLaDAModelLM
 from dinfer import BlockIteratorFactory, KVCacheFactory
-from dinfer import ThresholdParallelDecoder, BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM
+from dinfer import ThresholdParallelDecoder, BlockWiseDiffusionLLM, VicinityCacheDiffusionLLM
 
 def setup_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
@@ -31,7 +31,7 @@ def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold,
     decoder = ThresholdParallelDecoder(0, threshold=threshold)
     if sliding:
         cf_type = cache if cache in ('prefix', 'dual') else 'dual'
-        dllm = SlidingWindowDiffusionLLM(
+        dllm = VicinityCacheDiffusionLLM(
             model, decoder, BlockIteratorFactory(),
             KVCacheFactory(cf_type),
             prefix_look=prefix_look, after_look=after_look, warmup_steps=warmup_steps

@@ -41,7 +41,7 @@ class DiffusionLLM:
             EOS and any tokens after EOS have been removed.
         '''
 
-class BlockWiseDiffusionLLM:
+class BlockWiseDiffusionLLM(DiffusionLLM):
     """ This diffusion LLM inference generates tokens block by block.
 
     The decoding algorithm break the generation sequence into blocks.
@@ -112,7 +112,7 @@ class BlockWiseDiffusionLLM:
         return x.get_generated_tokens()
 
 
-class BlockWiseDiffusionLLMCont(BlockWiseDiffusionLLM):
+class IterSmoothDiffusionLLM(BlockWiseDiffusionLLM):
     """ This diffusion LLM inference generates tokens block by block.
 
     The decoding algorithm break the generation sequence into blocks.
@@ -207,11 +207,11 @@ class BlockWiseDiffusionLLMCont(BlockWiseDiffusionLLM):
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
         return x.get_generated_tokens()
 
-class SlidingWindowDiffusionLLM(DiffusionLLM):
-    """ This diffusion LLM inference generates tokens in a sliding window manner.
+class VicinityCacheDiffusionLLM(DiffusionLLM):
+    """ This diffusion LLM inference generates tokens with Vicinity Cache Update.
 
-    The decoding algorithm defines a window to decode tokens in each diffusion iteration.
-    After each iteration, the decoding window may slide forward to cover more masked tokens.
+    The decoding algorithm defines a window to update KV-cache in each diffusion iteration.
+    The window can be larger than the decoding block.
     """
     def __init__(self, model, decoder, iterator_factory, cache_factory, maximum_unroll=4, expected_tpf=8,
                  prefix_look=0, after_look=0, warmup_steps=0, early_stop=True):
@@ -287,11 +287,8 @@ class SlidingWindowDiffusionLLM(DiffusionLLM):
         return x.get_generated_tokens()
 
 
-class SlidingWindowDiffusionLLMCont(DiffusionLLM):
-    """ This diffusion LLM inference generates tokens in a sliding window manner.
-
-    The decoding algorithm defines a window to decode tokens in each diffusion iteration.
-    After each iteration, the decoding window may slide forward to cover more masked tokens.
+class IterSmoothWithVicinityCacheDiffusionLLM(DiffusionLLM):
+    """ This diffusion LLM inference generates tokens with vicinity cache and iteration smoothing.
     """
     def __init__(self, model, decoder, iterator_factory, cache_factory, maximum_unroll=4, expected_tpf=8,
                  prefix_look=0, after_look=0, warmup_steps=0, early_stop=True, cont_weight=0.3, 

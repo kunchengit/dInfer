@@ -9,7 +9,7 @@ from vllm.config import CompilationConfig, ParallelConfig
 from vllm.config import VllmConfig, set_current_vllm_config, get_current_vllm_config
 
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
-from dinfer import BlockWiseDiffusionLLM, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLMWithSP, SlidingWindowDiffusionLLMCont, BlockWiseDiffusionLLMCont
+from dinfer import BlockWiseDiffusionLLM, VicinityCacheDiffusionLLM, BlockWiseDiffusionLLMWithSP
 from dinfer import ThresholdParallelDecoder, HierarchyDecoder
 from dinfer import DiffusionLLMServing, SamplingParams
 
@@ -50,7 +50,7 @@ def test_token_array():
     arr[8:10] = torch.tensor([9, 10]).view(1, 2)
 
 class SimulateBlockIterator:
-    """ This class simulates the block iterator in SlidingWindowDiffusionLLM.
+    """ This class simulates the block iterator in VicinityCacheDiffusionLLM.
     """
     def __init__(self, x, block_length, mask_id):
         self.x = x
@@ -165,7 +165,7 @@ def test_diffusion():
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
 
     print('Test sliding-window diffusion LLM with dual KV-cache')
-    dllm = SlidingWindowDiffusionLLM(model, decoder, SimulateBlockIteratorFactory(), KVCacheFactory('dual'))
+    dllm = VicinityCacheDiffusionLLM(model, decoder, SimulateBlockIteratorFactory(), KVCacheFactory('dual'))
     res = dllm.generate(input_ids, gen_length=128, block_length=32)
     res1, nfe = generate_with_dual_cache(fastdllm_model, input_ids, gen_length=128, block_length=32, threshold=0.9)
     res1 = res1[res1 != 126081]

@@ -10,7 +10,7 @@ from vllm.config import VllmConfig, set_current_vllm_config, get_current_vllm_co
 
 from .parallel_strategy import ThresholdParallelDecoder
 from .utils import KVCacheFactory, BlockIteratorFactory
-from .generate_uniform import SlidingWindowDiffusionLLMCont, BlockWiseDiffusionLLMCont, SlidingWindowDiffusionLLM, BlockWiseDiffusionLLM
+from .generate_uniform import IterSmoothWithVicinityCacheDiffusionLLM, IterSmoothDiffusionLLM, VicinityCacheDiffusionLLM, BlockWiseDiffusionLLM
 from ..model.modeling_fused_olmoe import FusedOlmoeForCausalLM
 from ..model.modeling_llada import LLaDAModelLM
 
@@ -67,15 +67,15 @@ def init_generator(model, sample_params):
     else:
         cache_factory = None
     if cache_factory is not None and sample_params.cont_weight > 0:
-        dllm = SlidingWindowDiffusionLLMCont(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory,
+        dllm = IterSmoothWithVicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory,
                 early_stop=sample_params.early_stop, cont_weight=sample_params.cont_weight, prefix_look=sample_params.prefix_look,
                 after_look=sample_params.after_look, warmup_steps=sample_params.warmup_steps)
     elif cache_factory is not None:
-        dllm = SlidingWindowDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory,
+        dllm = VicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory,
                 early_stop=sample_params.early_stop, prefix_look=sample_params.prefix_look,
                 after_look=sample_params.after_look, warmup_steps=sample_params.warmup_steps)
     elif sample_params.cont_weight > 0:
-        dllm = BlockWiseDiffusionLLMCont(model, decoder, BlockIteratorFactory(), cache_factory=None,
+        dllm = IterSmoothDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=None,
                 early_stop=sample_params.early_stop, cont_weight=sample_params.cont_weight)
     else:
         dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=None,

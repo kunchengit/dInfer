@@ -15,7 +15,7 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
 from dinfer import BlockIteratorFactory, KVCacheFactory
-from dinfer import ThresholdParallelDecoder, BlockWiseDiffusionLLM, BlockWiseDiffusionLLMCont,SlidingWindowDiffusionLLM, SlidingWindowDiffusionLLMCont
+from dinfer import ThresholdParallelDecoder, BlockWiseDiffusionLLM, IterSmoothDiffusionLLM, VicinityCacheDiffusionLLM, IterSmoothWithVicinityCacheDiffusionLLM
 
 def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold, cache, num_test_iter=1, use_sw=False, have_warmup=True, cont_weight=0.3):
     device = model.device
@@ -35,13 +35,13 @@ def benchmark_gen(rank, model, tokenizer, prompt, gen_len, block_len, threshold,
 
     if cont_weight>0:
         if use_sw:
-            dllm = SlidingWindowDiffusionLLMCont(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, 
+            dllm = IterSmoothWithVicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True,
                 cont_weight=cont_weight, prefix_look=16, after_look=16, warmup_steps=4)
         else:
-            dllm = BlockWiseDiffusionLLMCont(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, cont_weight=cont_weight)
+            dllm = IterSmoothDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, cont_weight=cont_weight)
     else:
         if use_sw:
-            dllm = SlidingWindowDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True, 
+            dllm = VicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True,
                 prefix_look=16, after_look=16, warmup_steps=4)
         else:
             dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), cache_factory=cache_factory, early_stop=True)
