@@ -9,7 +9,7 @@ from vllm.config import CompilationConfig, ParallelConfig
 from vllm.config import VllmConfig, set_current_vllm_config, get_current_vllm_config
 
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
-from dinfer import BlockWiseDiffusionLLM, VicinityCacheDiffusionLLM, IterSmoothDiffusionLLM, BlockWiseDiffusionLLMWithSP
+from dinfer import BlockWiseDiffusionLLM, VicinityCacheDiffusionLLM, IterSmoothDiffusionLLM, IterSmoothWithVicinityCacheDiffusionLLM, BlockWiseDiffusionLLMWithSP
 from dinfer import ThresholdParallelDecoder, HierarchyDecoder
 from dinfer import DiffusionLLMServing, SamplingParams
 
@@ -22,6 +22,7 @@ from dinfer.decoding.generate_merge import generate_merge
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 from test_generate import IterSmoothDiffusionLLM as IterSmoothDiffusionLLM_test
+from test_generate import IterSmoothWithVicinityCacheDiffusionLLM as IterSmoothWithVicinityCacheDiffusionLLM_test
 
 #model_path = "/mnt/dllm/model_hub/LLaDA-1.5/"
 model_path = "/data/myx/llm/vllm/model/LLaDA-1_5/"
@@ -152,6 +153,18 @@ def test_moe_diffusion():
         print('Test block-wise diffusion MOE-LLM with iteration smooth with kv-cache')
         dllm = IterSmoothDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True, cache_factory=KVCacheFactory('dual'))
         dllm1 = IterSmoothDiffusionLLM_test(model, decoder, BlockIteratorFactory(), early_stop=True, cache_factory=KVCacheFactory('dual'))
+        res = dllm.generate(input_ids, gen_length=128, block_length=32)
+        res1 = dllm1.generate(input_ids, gen_length=128, block_length=32)
+        assert dllm.num_forwards == dllm1.num_forwards
+        assert dllm.cache_updates > 0
+        assert dllm.cache_updates == dllm1.cache_updates
+        assert res.shape[1] == res1.shape[1]
+        assert torch.all(res == res1)
+
+        # Test generation with iteration smooth and vicinity cache update.
+        print('Test block-wise diffusion MOE-LLM with iteration smooth with vicinity cache update')
+        dllm = IterSmoothWithVicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True, cache_factory=KVCacheFactory('dual'))
+        dllm1 = IterSmoothWithVicinityCacheDiffusionLLM_test(model, decoder, BlockIteratorFactory(), early_stop=True, cache_factory=KVCacheFactory('dual'))
         res = dllm.generate(input_ids, gen_length=128, block_length=32)
         res1 = dllm1.generate(input_ids, gen_length=128, block_length=32)
         assert dllm.num_forwards == dllm1.num_forwards

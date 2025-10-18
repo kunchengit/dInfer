@@ -353,66 +353,68 @@ class VicinityCacheDiffusionLLM(BlockWiseDiffusionLLM):
         self.diff_iteration = VicinityCacheIteration(prefix_look, after_look, warmup_steps)
         self.block_decoder = BlockDecoder(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
 
-class IterSmoothWithVicinityCacheDiffusionLLM(BlockWiseDiffusionLLM):
-    """ This diffusion LLM inference generates tokens with vicinity cache and iteration smoothing.
+    @property
+    def num_forwards(self):
+        return self.diff_iteration.num_forwards
+
+    @property
+    def cache_updates(self):
+        return self.diff_iteration.cache_updates
+
+class IterSmoothWithVicinityCache(DiffusionIteration):
+    """ A diffusion iteration to decode tokens
     """
-    def __init__(self, model, decoder, iterator_factory, cache_factory, maximum_unroll=4, expected_tpf=8,
-                 prefix_look=0, after_look=0, warmup_steps=0, early_stop=True, cont_weight=0.3, 
-                 cont_weight_init=0.15, cont_weight_growth=0.02, threshold_decay=0.02):
-        self.model = model
-        self.cache_factory = cache_factory
-        self.decoder = decoder
-        self.iterator_factory = iterator_factory
-        self.num_forwards = 0
-        self.cache_updates = 0
+    def __init__(self, model, prefix_look, after_look, warmup_steps,
+            cont_weight=0.3, cont_weight_init=0.15, cont_weight_growth=0.02, threshold_decay=0.02):
+        super().__init__()
         self.prefix_look = int(prefix_look)
         self.after_look = int(after_look)
         self.warmup_steps = int(warmup_steps)
-        self.early_stop = early_stop
+
         self.cont_weight = cont_weight
-        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-            self.h2e = self.model.module.h2e
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            self.h2e = model.module.h2e
         else:
-            self.h2e = self.model.h2e
+            self.h2e = model.h2e
         self.cont_weight_init = cont_weight_init
         self.cont_weight_growth = cont_weight_growth
         self.threshold_decay = threshold_decay
-        self.maximum_unroll = maximum_unroll
-        self.expected_tpf = expected_tpf
-        assert cache_factory is not None, "This class requires a KV-cache."
+        self.inputs_embeds = None
 
-    def diffusion_forward(self, x, kv_cache, block, block_loc, block_id, iter_no):
+    def forward(self, model, decoder, x, kv_cache, block, block_loc, block_id, iter_no):
+        """ The forward computation to decode tokens.
+        """
         total_len = x.total_length
         block_start, block_end = block_loc.start, block_loc.end
         left_start = max(0, block_start - self.prefix_look)
         right_end = min(total_len, block_end + self.after_look)
 
         iter_cont_weight = min(self.cont_weight_init+self.cont_weight_growth*iter_no, self.cont_weight)
-        iter_threshold = max(1-iter_no*self.threshold_decay, self.decoder.threshold)
+        iter_threshold = max(1-iter_no*self.threshold_decay, decoder.threshold)
         if self.inputs_embeds is None:
             self.inputs_embeds = self.h2e(x.data)
         if iter_no < self.warmup_steps:
-            out_full = self.model(inputs_embeds=inputs_embeds)
+            out_full = model(inputs_embeds=self.inputs_embeds)
             self.num_forwards += 1
-            self.decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x, iter_threshold)
-            mask_index = (x.data == self.decoder.mask_id)
+            decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x, iter_threshold)
+            mask_index = (x.data == decoder.mask_id)
             self.inputs_embeds = self.h2e(x.data, mask_index, out_full.logits, iter_cont_weight)
             return
 
         if kv_cache.past_key_values is None or (kv_cache.require_update(iter_no, block_start, block_end) and block_id > 0):
-            out_full = self.model(inputs_embeds=inputs_embeds, use_cache=True)
+            out_full = model(inputs_embeds=self.inputs_embeds, use_cache=True)
             self.num_forwards += 1
-            self.decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x, iter_threshold)
-            mask_index = (x.data == self.decoder.mask_id)
+            decoder.decode(out_full.logits[:, block_start:block_end], block_start, block_end, x, iter_threshold)
+            mask_index = (x.data == decoder.mask_id)
             self.inputs_embeds = self.h2e(x.data, mask_index, out_full.logits, iter_cont_weight)
             kv_cache.update(out_full.past_key_values)
             self.cache_updates += 1
 
         iter_cont_weight = min(self.cont_weight_init+self.cont_weight_growth*iter_no, self.cont_weight)
-        iter_threshold = max(1-iter_no*self.threshold_decay, self.decoder.threshold)
+        iter_threshold = max(1-iter_no*self.threshold_decay, decoder.threshold)
         past_key_values, replace_position = kv_cache.get_key_values(left_start, right_end)
-        out_step = self.model(
-                inputs_embeds=inputs_embeds[:, left_start:right_end],
+        out_step = model(
+                inputs_embeds=self.inputs_embeds[:, left_start:right_end],
                 past_key_values=past_key_values,
                 use_cache=True,
                 replace_position=replace_position
@@ -422,9 +424,34 @@ class IterSmoothWithVicinityCacheDiffusionLLM(BlockWiseDiffusionLLM):
         iter_no += 1
         offset = block_start - left_start
         logits_block = out_step.logits[:, offset:offset + (block_end - block_start)]
-        self.decoder.decode(logits_block, block_start, block_end, x, iter_threshold)
-        mask_index = (x.data[:, left_start:right_end] == self.decoder.mask_id)
+        decoder.decode(logits_block, block_start, block_end, x, iter_threshold)
+        mask_index = (x.data[:, left_start:right_end] == decoder.mask_id)
         self.inputs_embeds[:, left_start:right_end] = self.h2e(x.data[:, left_start:right_end], mask_index, out_step.logits, iter_cont_weight)
+
+class IterSmoothWithVicinityCacheDiffusionLLM(BlockWiseDiffusionLLM):
+    """ This diffusion LLM inference generates tokens with vicinity cache and iteration smoothing.
+    """
+    def __init__(self, model, decoder, iterator_factory, cache_factory, maximum_unroll=4, expected_tpf=8,
+                 prefix_look=0, after_look=0, warmup_steps=0, early_stop=True, cont_weight=0.3,
+                 cont_weight_init=0.15, cont_weight_growth=0.02, threshold_decay=0.02):
+        self.model = model
+        self.cache_factory = cache_factory
+        self.decoder = decoder
+        self.iterator_factory = iterator_factory
+        assert cache_factory is not None, "This class requires a KV-cache."
+        self.diff_iteration = IterSmoothWithVicinityCache(model, prefix_look, after_look, warmup_steps,
+                cont_weight=cont_weight, cont_weight_init=cont_weight_init, cont_weight_growth=cont_weight_growth,
+                threshold_decay=threshold_decay)
+        self.block_decoder = BlockDecoder(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+
+    @property
+    def num_forwards(self):
+        return self.diff_iteration.num_forwards
+
+    @property
+    def cache_updates(self):
+        return self.diff_iteration.cache_updates
+
 
 class BlockWiseDiffusionLLMWithSP(DiffusionLLM):
     """ Diffusion LLM inference with sequence parallel.
