@@ -87,8 +87,8 @@ class BlockDecoder:
             # Here we assume that don't perform remasking.
             # TODO(zhengda) here we assume the batch size is 1.
             x[block_loc.end:] = decoder.eos_id
-            return True
-        return False
+            return iter_no, True
+        return iter_no, False
 
 class DiffusionIteration:
     """ A diffusion iteration to decode tokens
@@ -204,7 +204,7 @@ class BlockWiseDiffusionLLM(DiffusionLLM):
         kv_cache = self.cache_factory.create() if self.cache_factory is not None else None
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
-            decode_compl = self.block_decoder.decode(self.model, self.decoder, x, kv_cache, block, block_loc, block_id, iter_no)
+            iter_no, decode_compl = self.block_decoder.decode(self.model, self.decoder, x, kv_cache, block, block_loc, block_id, iter_no)
             if decode_compl:
                 break
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
@@ -242,7 +242,6 @@ class IterationSmooth(DiffusionIteration):
             mask_index = (x.data == decoder.mask_id)
             self.inputs_embeds = self.h2e(x.data, mask_index, output.logits, iter_cont_weight)
             kv_cache.update(output.past_key_values)
-            past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
             self.cache_updates += 1
             # TODO This is a bug?
             #iter_no += 1
@@ -255,6 +254,7 @@ class IterationSmooth(DiffusionIteration):
             mask_index = (x.data == decoder.mask_id)
             self.inputs_embeds = self.h2e(x.data, mask_index, logits, iter_cont_weight)
         elif kv_cache.cache_type == 'prefix':
+            past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
             logits = model(inputs_embeds=self.inputs_embeds[:, block_loc.start:], past_key_values=past_key_values, use_cache=True,
                     replace_position=replace_position).logits
             block_length = block_loc.end - block_loc.start
@@ -262,6 +262,7 @@ class IterationSmooth(DiffusionIteration):
             mask_index = (x.data[:, block_loc.start:] == decoder.mask_id)
             self.inputs_embeds[:, block_loc.start:] = self.h2e(x.data[:, block_loc.start:], mask_index, logits, iter_cont_weight)
         else:
+            past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
             # cache position is the position between current_block_start and current_block_end
             logits = model(inputs_embeds=self.inputs_embeds[:, block_loc.start:block_loc.end], past_key_values=past_key_values, use_cache=True,
                     replace_position=replace_position).logits
@@ -289,6 +290,14 @@ class IterSmoothDiffusionLLM(BlockWiseDiffusionLLM):
         self.expected_tpf = expected_tpf
         self.diff_iteration = IterationSmooth(self.model, cont_weight, cont_weight_init, cont_weight_growth, threshold_decay)
         self.block_decoder = BlockDecoder(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+
+    @property
+    def num_forwards(self):
+        return self.diff_iteration.num_forwards
+
+    @property
+    def cache_updates(self):
+        return self.diff_iteration.cache_updates
 
 class VicinityCacheIteration(DiffusionIteration):
     """ A diffusion iteration to decode tokens
