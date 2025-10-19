@@ -1,4 +1,5 @@
 import os
+import logging
 import multiprocessing as mp
 
 import torch
@@ -12,7 +13,9 @@ from .parallel_strategy import ThresholdParallelDecoder
 from .utils import KVCacheFactory, BlockIteratorFactory
 from .generate_uniform import IterSmoothWithVicinityCacheDiffusionLLM, IterSmoothDiffusionLLM, VicinityCacheDiffusionLLM, BlockWiseDiffusionLLM
 from ..model.modeling_fused_olmoe import FusedOlmoeForCausalLM
-from ..model.modeling_llada import LLaDAModelLM
+from ..model.modeling_llada_origin import LLaDAModelLM
+
+logger = logging.getLogger(__name__)
 
 class SamplingParams:
     """ The parameters used for sampling a sequence.
@@ -97,6 +100,7 @@ def generate(dllm, device, req_q, res_q):
 def moe_server_process(model_path, sample_params, world_size, rank, gpu_id, q, res_q, master_port):
     torch.cuda.set_device(gpu_id)
     device = torch.device(gpu_id)
+    logger.info(f'start MOE server. server port: {master_port}')
 
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = str(master_port)
@@ -105,9 +109,6 @@ def moe_server_process(model_path, sample_params, world_size, rank, gpu_id, q, r
     # setup EP
     parallel_config = ParallelConfig(enable_expert_parallel = True)
     with set_current_vllm_config(VllmConfig(parallel_config = parallel_config)):
-        vllm_config = get_current_vllm_config()
-        print("EP Enabled:", vllm_config.parallel_config.enable_expert_parallel)
-
         model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         model = FusedOlmoeForCausalLM(config=model_config).eval()
         model.load_weights(model_path, torch_dtype=torch.bfloat16)
@@ -120,7 +121,8 @@ def moe_server_process(model_path, sample_params, world_size, rank, gpu_id, q, r
         dllm = init_generator(model, sample_params)
         generate(dllm, model.device, req_q=q, res_q=res_q)
 
-    dist.destroy_process_group()
+    # TODO(zhengda) we should destroy the distributed environment. However, the function hangs if TP/EP is turned on.
+    #vllm_dist.destroy_distributed_environment()
 
 def server_process(model_path, sample_params, world_size, rank, gpu_id, q, res_q, master_port):
     torch.cuda.set_device(gpu_id)
@@ -134,7 +136,7 @@ def server_process(model_path, sample_params, world_size, rank, gpu_id, q, res_q
     config.flash_attention = True
     model = LLaDAModelLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, config=config).eval()
     if world_size > 1:
-        model.tensor_parallel(world_size)
+        model.tensor_parallel(rank, world_size)
     if sample_params.enable_torch_compile:
         model.forward = torch.compile(model.forward, mode='reduce-overhead', fullgraph=False, dynamic=True)
     model = model.to(device)
@@ -144,7 +146,7 @@ def server_process(model_path, sample_params, world_size, rank, gpu_id, q, res_q
 
     dist.destroy_process_group()
 
-class ServerHandle:
+class ServerGroup:
     def __init__(self):
         self.procs = []
         self.req_qs = []
@@ -158,12 +160,12 @@ class ServerHandle:
     def get_response(self):
         return self.res_q.get()
 
-    def start_server(self, model_path, is_moe, sample_params, server_port, num_gpus):
+    def start_server(self, model_path, is_moe, sample_params, server_port, gpus):
         ctx = mp.get_context('spawn')
         assert len(self.procs) == 0, 'The server is already running.'
         procs = []
         req_qs = []
-        for i in range(num_gpus):
+        for i, gpu in enumerate(gpus):
             if i == 0:
                 res_q = ctx.Queue()
                 self.res_q = res_q
@@ -172,9 +174,9 @@ class ServerHandle:
             q = ctx.Queue()
             req_qs.append(q)
             if is_moe:
-                p = ctx.Process(target=moe_server_process, args=(model_path, sample_params, num_gpus, i, i, q, res_q, server_port))
+                p = ctx.Process(target=moe_server_process, args=(model_path, sample_params, len(gpus), i, gpu, q, res_q, server_port))
             else:
-                p = ctx.Process(target=server_process, args=(model_path, sample_params, num_gpus, i, i, q, res_q, server_port))
+                p = ctx.Process(target=server_process, args=(model_path, sample_params, len(gpus), i, gpu, q, res_q, server_port))
             p.daemon = True
             procs.append(p)
             p.start()
@@ -193,6 +195,41 @@ class ServerHandle:
         self.procs = []
         self.req_qs = []
         self.req_q = None
+
+class ServerHandle:
+    def __init__(self):
+        self.groups = []
+
+    def add_requests(self, reqs):
+        prompts, gen_length, block_length = reqs
+        assert len(self.groups) == prompts.shape[0], 'We cannot only use DP to support batch size > 1.'
+        for i, prompt in enumerate(prompts):
+            self.groups[i].add_request((prompt.unsqueeze(0), gen_length, block_length))
+
+    def get_responses(self):
+        res = []
+        for group in self.groups:
+            res.append(group.get_response())
+        return res
+
+    def start_server(self, model_path, is_moe, sample_params, server_port, num_gpus, dp_size, tpep_size):
+        gpu = 0
+        assert num_gpus >= dp_size * tpep_size
+        for i in range(dp_size):
+            self.groups.append(ServerGroup())
+            server_port += 1
+            gpus = [gpu + i for i in range(tpep_size)]
+            logger.info(f'start server group on GPU {gpus}, server port: {server_port}')
+            self.groups[-1].start_server(model_path, is_moe, sample_params, server_port, gpus)
+            gpu = gpus[-1] + 1
+
+    def is_running(self):
+        return len(self.groups) != 0
+
+    def stop_running(self):
+        for group in self.groups:
+            group.stop_running()
+        self.groups = []
 
 handle = ServerHandle()
 
@@ -216,21 +253,27 @@ class DiffusionLLMServing:
     num_gpus : int
         The number of GPUs used for parallel computation.
     """
-    def __init__(self, model, is_moe=True, sample_params=None, server_port=12345, num_gpus=None):
+    def __init__(self, model, is_moe=True, sample_params=None, server_port=12345, num_gpus=None, dp_size=None, tpep_size=None):
         if sample_params is None:
             sample_params = SamplingParams()
+        self.sample_params = sample_params
         if num_gpus is None:
             num_gpus = torch.cuda.device_count()
+        if dp_size is None:
+            dp_size = 1
+        if tpep_size is None:
+            tpep_size = num_gpus // dp_size
+        assert dp_size * tpep_size <= num_gpus
         if not handle.is_running():
-            handle.start_server(model, is_moe, sample_params, server_port, num_gpus)
+            handle.start_server(model, is_moe, sample_params, server_port, num_gpus, dp_size, tpep_size)
 
-    def generate(self, prompt, gen_length=128, block_length=128):
+    def generate(self, prompts, gen_length=128, block_length=128):
         ''' Generate tokens with diffusion iterations.
 
         Parameters:
         ----------
-        prompt: Torch.Tensor
-            A tensor of shape (1, L) that contains the input prompt.
+        prompts: Torch.Tensor
+            A tensor of shape (b, L) that contains the input prompts.
         gen_length: int
             Generated answer length.
         block_length: int
@@ -238,12 +281,19 @@ class DiffusionLLMServing:
 
         Returns
         -------
-        Torch.Tensor: A tensor of shape (1, L') that contains the prompt tokens and the generated tokens.
-            EOS and any tokens after EOS have been removed.
+        Torch.Tensor: A tensor of shape (b, L') that contains the prompt tokens and the generated tokens.
+            The generation results of different lengths are padded with EOS.
         '''
-        prompt = prompt.cpu()
-        handle.add_request((prompt, gen_length, block_length))
-        return handle.get_response()
+        prompts = prompts.cpu()
+        handle.add_requests((prompts, gen_length, block_length))
+        tensors = handle.get_responses()
+        max_len = max([tensor.shape[1] for tensor in tensors])
+        res = torch.zeros(len(tensors), max_len, dtype=tensors[0].dtype)
+        res[:] = self.sample_params.eos_id
+        for i, tensor in enumerate(tensors):
+            out_len = int(tensor.shape[1])
+            res[i, :out_len] = tensor[0]
+        return res
 
     def stop_serving(self):
         """ Stop model serving.

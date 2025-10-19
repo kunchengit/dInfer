@@ -64,6 +64,7 @@ class BlockWiseDiffusionLLM(DiffusionLLM):
     def generate(self, prompt, gen_length=128, block_length=128):
         ''' Generate tokens with diffusion iterations block by block.
         '''
+        assert prompt.shape[0] == 1, "We currently only support batch size = 1."
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 

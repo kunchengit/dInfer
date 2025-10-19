@@ -319,9 +319,6 @@ def test_moe_server(require_init=True):
     input_ids = tokenizer(prompt)['input_ids']
     input_ids = torch.tensor(input_ids).unsqueeze(0)
 
-    llm = DiffusionLLMServing(model=moe_model_path, is_moe=True, sample_params=params, num_gpus=1)
-    res = llm.generate(input_ids, gen_length=256, block_length=32)
-
     device = torch.device(0)
     if require_init:
         from vllm import distributed
@@ -343,10 +340,35 @@ def test_moe_server(require_init=True):
         model = model.to(device)
 
         dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
-        res1 = dllm.generate(input_ids, gen_length=256, block_length=32)
-        assert res.shape == res1.shape
-        assert torch.all(res == res1)
+        res1 = dllm.generate(input_ids, gen_length=256, block_length=32).cpu()
 
+    # Test DP == 1 and TPEP == 1
+    print('Test serving: DP == 1 and TPEP == 1')
+    llm = DiffusionLLMServing(model=moe_model_path, is_moe=True, sample_params=params, num_gpus=1, server_port=12350)
+    res = llm.generate(input_ids, gen_length=256, block_length=32)
+    assert res.shape == res1.shape
+    assert torch.all(res == res1)
+    llm.stop_serving()
+
+    input_ids2 = torch.cat([input_ids, input_ids])
+    # Test DP == 2 and TPEP == 1
+    print('Test serving: DP == 2 and TPEP == 1')
+    llm = DiffusionLLMServing(model=moe_model_path, is_moe=True, sample_params=params, num_gpus=2, dp_size=2, tpep_size=1, server_port=12351)
+    res2 = llm.generate(input_ids2, gen_length=256, block_length=32)
+    assert torch.all(res2[0] == res)
+    assert torch.all(res2[1] == res)
+    llm.stop_serving()
+
+    # Test DP == 2 and TPEP == 2
+    print('Test serving: DP == 2 and TPEP == 2')
+    llm = DiffusionLLMServing(model=moe_model_path, is_moe=True, sample_params=params, num_gpus=2, dp_size=1, tpep_size=2, server_port=12352)
+    res = llm.generate(input_ids, gen_length=256, block_length=32)
+    llm.stop_serving()
+
+    input_ids2 = torch.cat([input_ids, input_ids])
+    llm = DiffusionLLMServing(model=moe_model_path, is_moe=True, sample_params=params, num_gpus=4, dp_size=2, tpep_size=2, server_port=12354)
+    res2 = llm.generate(input_ids2, gen_length=256, block_length=32)
+    assert torch.all(res2[0][res2[0] != 156892] == res[0])
     llm.stop_serving()
 
 def test_server():
@@ -360,9 +382,6 @@ def test_server():
     input_ids = tokenizer(prompt)['input_ids']
     input_ids = torch.tensor(input_ids).unsqueeze(0)
 
-    llm = DiffusionLLMServing(model=model_path, is_moe=False, sample_params=params, num_gpus=1)
-    res = llm.generate(input_ids, gen_length=256, block_length=32)
-
     torch.cuda.set_device(0)
     device = torch.device(0)
     config = AutoConfig.from_pretrained(model_path)
@@ -370,23 +389,27 @@ def test_server():
     model = LLaDAModelLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, config=config).eval()
     model.forward = torch.compile(model.forward, mode='reduce-overhead', fullgraph=False, dynamic=True)
     model = model.to(device)
-
     # Test generation without cache.
     decoder = ThresholdParallelDecoder(0, threshold=0.9)
     dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
-    res1 = dllm.generate(input_ids, gen_length=256, block_length=32)
+    res1 = dllm.generate(input_ids, gen_length=256, block_length=32).cpu()
+
+    # Test DP == 1 and TPEP == 1
+    print('Test serving: DP == 1 and TPEP == 1')
+    llm = DiffusionLLMServing(model=model_path, is_moe=False, sample_params=params, num_gpus=1, server_port=12361)
+    res = llm.generate(input_ids, gen_length=256, block_length=32)
+    llm.stop_serving()
     assert res.shape == res1.shape
     assert torch.all(res == res1)
 
-    llm.stop_serving()
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     logging.basicConfig(level=logging.INFO)
     test_moe_diffusion()
-    test_moe_server(False)
     test_diffusion()
     test_server()
+    test_moe_server(False)
 
     test_token_array()
     test_block_iterator()
