@@ -30,7 +30,7 @@ class DiffusionLLM:
             EOS and any tokens after EOS have been removed.
         '''
 
-class BlockDecoder:
+class BlockRunner:
     """ The class decodes all tokens in a block
 
     Parameters
@@ -151,7 +151,72 @@ class BaseDiffusionIteration(DiffusionIteration):
             # cache position is the position between current_block_start and current_block_end
             logits = model(block, past_key_values=past_key_values, use_cache=True,
                     replace_position=replace_position).logits
+        
+
         decoder.decode(logits, block_loc.start, block_loc.end, x)
+        self.num_forwards += 1
+        self.iter_no += 1
+
+class ShiftDiffusionIteration(DiffusionIteration):
+    """ A shift implementation of diffusion iteration to decode.
+    """
+    def __init__(self, use_shift = False):
+        super().__init__()
+        self.iter_no = 0
+
+    def forward(self, model, decoder, x, kv_cache, block, block_loc, block_id):
+        """ Decode tokens in a forward run on a block.
+
+        The forward run decodes tokens in the input array.
+
+        Parameters
+        ----------
+        model : pytorch model
+            The diffusion LLM
+        decoder : ParallelDecoder
+            The decoder
+        x : TokenArray
+            The input tokens. The decoded tokens are also stored in this array.
+        kv_cache: KVCache
+            The KV-cache
+        block : torch.Tensor
+            The input IDs of the tokens in the current decoding block.
+        block_loc : BlockLoc
+            The start and the end of the location of the decoding block.
+        block_id : int
+            The block ID
+        """
+        block_start, block_end = block_loc.start-1, block_loc.end-1
+        # Update KV-cache
+        if kv_cache is not None and kv_cache.require_update(self.iter_no, block_start, block_end):
+            output = model(x.data, use_cache=True)
+            self.num_forwards += 1
+            # use the generated output to decode.
+            # TODO(dulun): need to improve efficiency
+            x_shifted = TokenArray(x.data[:, 1:], 0, decoder.mask_id, decoder.eos_id, model.device)
+            decoder.decode(output.logits[:, block_start:block_end], block_start, block_end, x_shifted)
+            x.data[:, 1:] = x_shifted.data
+            # update KV-cache
+            kv_cache.update(output.past_key_values)
+            self.cache_updates += 1
+
+        if kv_cache is None:
+            logits = model(x.data).logits[:, block_start:block_end]
+        elif kv_cache.cache_type == 'prefix':
+            past_key_values, replace_position = kv_cache.get_key_values(block_start, block_end)
+            logits = model(x[block_start:], past_key_values=past_key_values, use_cache=True,
+                    replace_position=replace_position).logits
+            block_length = block_end - block_start
+            logits = logits[:, :block_length]
+        else:
+            # cache position is the position between current_block_start and current_block_end
+            past_key_values, replace_position = kv_cache.get_key_values(block_start, block_end)
+            logits = model(x[block_start:block_end], past_key_values=past_key_values, use_cache=True,
+                    replace_position=replace_position).logits
+        # TODO(dulun): need to improve efficiency
+        x_shifted = TokenArray(x.data[:, 1:], 0, decoder.mask_id, decoder.eos_id, model.device)
+        decoder.decode(logits, block_start, block_end, x_shifted)
+        x.data[:, 1:] = x_shifted.data
         self.num_forwards += 1
         self.iter_no += 1
 
@@ -176,13 +241,17 @@ class BlockWiseDiffusionLLM(DiffusionLLM):
     cache_factory : KVCacheFactory (optional)
         The KV-cache factory that generates a kv-cache for LLM.
     """
-    def __init__(self, model, decoder, iterator_factory, early_stop=True, cache_factory=None, maximum_unroll=4, expected_tpf=8):
+    def __init__(self, model, decoder, iterator_factory, early_stop=True, cache_factory=None, maximum_unroll=4, expected_tpf=8, use_shift=False):
         self.model = model
         self.cache_factory = cache_factory
         self.decoder = decoder
         self.iterator_factory = iterator_factory
-        self.diff_iteration = BaseDiffusionIteration()
-        self.block_decoder = BlockDecoder(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        if use_shift:
+            self.diff_iteration = ShiftDiffusionIteration()
+        else:
+            self.diff_iteration = BaseDiffusionIteration()
+        self.block_decoder = BlockRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        
 
     @property
     def num_forwards(self):
@@ -291,7 +360,7 @@ class IterSmoothDiffusionLLM(BlockWiseDiffusionLLM):
         self.maximum_unroll = maximum_unroll
         self.expected_tpf = expected_tpf
         self.diff_iteration = IterationSmooth(self.model, cont_weight, cont_weight_init, cont_weight_growth, threshold_decay)
-        self.block_decoder = BlockDecoder(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        self.block_decoder = BlockRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
 
     @property
     def num_forwards(self):
@@ -357,7 +426,7 @@ class VicinityCacheDiffusionLLM(BlockWiseDiffusionLLM):
         self.iterator_factory = iterator_factory
         assert cache_factory is not None, "This class requires a KV-cache."
         self.diff_iteration = VicinityCacheIteration(prefix_look, after_look, warmup_steps)
-        self.block_decoder = BlockDecoder(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        self.block_decoder = BlockRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
 
     @property
     def num_forwards(self):
@@ -451,7 +520,7 @@ class IterSmoothWithVicinityCacheDiffusionLLM(BlockWiseDiffusionLLM):
         self.diff_iteration = IterSmoothWithVicinityCache(model, prefix_look, after_look, warmup_steps,
                 cont_weight=cont_weight, cont_weight_init=cont_weight_init, cont_weight_growth=cont_weight_growth,
                 threshold_decay=threshold_decay)
-        self.block_decoder = BlockDecoder(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        self.block_decoder = BlockRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
 
     @property
     def num_forwards(self):

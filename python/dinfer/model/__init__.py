@@ -18,5 +18,6 @@
 from .configuration_llada import LLaDAConfig
 from .modeling_llada_origin import LLaDAModelLM
 from .modeling_fused_olmoe import FusedOlmoeForCausalLM
+from .modeling_bailing_moe_v2 import BailingMoeV2ForCausalLM
+__all__ = ['LLaDAConfig', 'LLaDAModelLM', 'FusedOlmoeForCausalLM', 'BailingMoeV2ForCausalLM']
 
-__all__ = ['LLaDAConfig', 'LLaDAModelLM', 'FusedOlmoeForCausalLM']
