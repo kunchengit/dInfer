@@ -1,0 +1,45 @@
+# 自动使用时间戳作为后缀
+name: dinfer-ut-h100-${{triggerMode}}
+
+# 实验描述
+desc: dinfer-ut-h100-desc
+dima_id: 2025092500111185166
+
+# 机器规格配置
+cpu_num: 12
+mem: 100G
+disk: 250G
+gpu_type: h100
+gpu_num: 4
+shared_mem: 1024000
+
+# 设置本次任务的tag
+tag: type=dinfer-ut-h100
+repo: antllm
+commit_id: max_v2
+
+# 有权限使用的资源池
+app: graphhuanan
+priority: high
+runtime: pytorch
+enable_pcache_fuse: true
+
+# 镜像地址
+image: reg.docker.alibaba-inc.com/aii/aistudio:aistudio-206272713-2972869896-1760714643367
+auto_data_stores: false
+source_root: ./
+enable_wait: false
+
+# 远端执行的命令
+command:
+  - mkdir -p /mnt/dllm
+  - mountpoint -q /mnt/dllm || mount -t nfs -o vers=3,nolock,proto=tcp,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 2645564b993-kvk4.cn-heyuan-alipay.nas.aliyuncs.com:/ /mnt/dllm/
+  - git clone git@code.alipay.com:LLMInfra/dInfer.git
+  - git -C dInfer fetch --depth 1 origin ${{commit_id}}
+  - git -C dInfer checkout -q FETCH_HEAD
+  - cd dInfer
+  - perl -pi -e 's/^(model_path|moe_model_path)/# $1/' tests/test.py
+  - perl -pi -e 's/^#(model_path|moe_model_path)/$1/' tests/test.py
+  - pip install -e .
+  - pip install numpy==1.26.4 flash_attn==2.8.3
+  - PYTHONPATH=tests python3 -m pytest tests/test.py
