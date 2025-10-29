@@ -1,20 +1,20 @@
 # 自动使用时间戳作为后缀
-name: dinfer-ut-h100-${{triggerMode}}
+name: dinfer-ut-h20-${{triggerMode}}
 
 # 实验描述
-desc: dinfer-ut-h100-desc
+desc: dinfer-ut-h20-desc
 dima_id: 2025092500111185166
 
 # 机器规格配置
 cpu_num: 12
 mem: 100G
 disk: 250G
-gpu_type: h100
+gpu_type: h20-3e
 gpu_num: 4
 shared_mem: 1024000
 
 # 设置本次任务的tag
-tag: type=dinfer-ut-h100
+tag: type=dinfer-ut-h20
 repo: antllm
 commit_id: max_v2
 

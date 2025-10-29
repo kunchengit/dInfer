@@ -2,6 +2,8 @@ import torch
 import numpy as np
 import logging
 
+from transformers.models.layoutlmv2.modeling_layoutlmv2 import relative_position_bucket
+
 from .utils import TokenArray, DistAlignedTokenArray, gather_sequence_block
 from .utils import calculate_op_num
 
@@ -87,6 +89,100 @@ class BlockRunner:
             return True
         return False
 
+class BlockDiffusionRunner(BlockRunner):
+    """ The class decodes all tokens in a block
+
+    Parameters
+    ----------
+    diff_iteration : BlockDiffusionIteration
+        Run forward computation on a block to decode tokens
+    early_stop : bool
+        Whether or not to have early stop
+    maximum_unroll : int
+        The max number of iterations to unroll
+    expected_tpf : int
+        The expected TPF for loop unrolling.
+    """
+    def __init__(self, diff_iteration, early_stop, maximum_unroll, expected_tpf):
+        super().__init__(diff_iteration, early_stop, maximum_unroll, expected_tpf)
+
+    def prefill(self, model, block, kv_cache, pos_ids, attn_mask):
+        """ Prefill for KV Cache
+        Parameters
+        ----------
+        model : pytorch model
+            The diffusion LLM
+        block : torch.Tensor
+            The input IDs of the tokens in the prefilling range.
+        kv_cache: KVCache
+            The KV-cache
+        pos_ids: torch.Tensor
+            The position IDs of the tokens in the prefilling range.
+        attn_mask: torch.Tensor
+            The attention mask of the tokens in the prefilling range.
+        """
+        if kv_cache is None:
+            return
+        else:
+            output = model(block, use_cache=True, attention_mask=attn_mask, position_ids=pos_ids)
+            kv_cache.update(output.past_key_values)
+
+    def decode(self, model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask):
+        """ Decode all tokens in a block.
+
+        Parameters
+        ----------
+        model : pytorch model
+            The diffusion LLM
+        decoder : ParallelDecoder
+            The decoder
+        x : TokenArray
+            The input tokens. The decoded tokens are also stored in this array.
+        kv_cache: KVCache
+            The KV-cache
+        block : torch.Tensor
+            The input IDs of the tokens in the current decoding block.
+        block_loc : BlockLoc
+            The start and the end of the location of the decoding block.
+        block_id : int
+            The block ID
+        pos_ids: torch.Tensor
+            The position IDs of all the tokens.
+        attn_mask: torch.Tensor
+            The attention mask of all the tokens. 
+        Returns
+        -------
+        bool : whether we have decoded all tokens in the sequence.
+        """
+        if kv_cache is not None:
+            kv_cache.extend_cache(block_loc.end)
+            past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
+        else:
+            past_key_values, replace_position = None, None
+
+        while (block == decoder.mask_id).sum() > 0:
+            unroll_k = max(min((block == decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 1)
+            for unroll_i in range(unroll_k):
+                self.diff_iteration.forward(model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position)
+        
+        # additional forward to update kvcache for the last decoding step in the current block
+        if kv_cache is not None:
+            output = model(block, 
+                past_key_values=past_key_values,
+                use_cache=True, 
+                position_ids=pos_ids[:, block_loc.start:block_loc.end],
+                attention_mask=attn_mask[:,block_loc.start: block_loc.end, :block_loc.end],
+                replace_position=replace_position)
+            kv_cache.update(output.past_key_values)
+
+        if self.early_stop and torch.any(x[block_loc.start:block_loc.end] == decoder.eos_id):
+            # Find the first location of EOS and set all tokens after the location to EOS.
+            # Here we assume that don't perform remasking.
+            # TODO(zhengda) here we assume the batch size is 1.
+            x[block_loc.end:] = decoder.eos_id
+            return True
+        return False
+
 class DiffusionIteration:
     """ A diffusion iteration to decode tokens
     """
@@ -152,10 +248,67 @@ class BaseDiffusionIteration(DiffusionIteration):
             logits = model(block, past_key_values=past_key_values, use_cache=True,
                     replace_position=replace_position).logits
         
-
         decoder.decode(logits, block_loc.start, block_loc.end, x)
         self.num_forwards += 1
         self.iter_no += 1
+
+class BlockDiffusionIteration:
+    """ An implementation of block diffusion iteration to decode.
+    """
+    def __init__(self):
+        self.num_forwards = 0
+        self.cache_updates = 0
+        self.iter_no = 0
+
+    def forward(self, model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position):
+        """ Decode tokens in a forward run on a block.
+
+        The forward run decodes tokens in the input array.
+
+        Parameters
+        ----------
+        model : pytorch model
+            The diffusion LLM
+        decoder : ParallelDecoder
+            The decoder
+        x : TokenArray
+            The input tokens. The decoded tokens are also stored in this array.
+        kv_cache: KVCache
+            The KV-cache
+        block : torch.Tensor
+            The input IDs of the tokens in the current decoding block.
+        block_loc : BlockLoc
+            The start and the end of the location of the decoding block.
+        block_id : int
+            The block ID
+        pos_ids: torch.Tensor
+            The position IDs of all the tokens.
+        attn_mask: torch.Tensor
+            The attention mask of all the tokens. 
+        past_key_values: List[List[torch.Tensor]]
+            The key-values required to decode the specified block.
+        replace_position: torch.Tensor 
+            The tensor indicates the valid locations in the returned key-values.
+        """
+        if kv_cache is None:
+            logits = model(x.data[:, :block_loc.end], 
+                attention_mask=attn_mask[:,:block_loc.end,:block_loc.end], 
+                position_ids=pos_ids[:, :block_loc.end]).logits[:, block_loc.start:block_loc.end]
+        else:
+            output = model(block,
+                position_ids=pos_ids[:,block_loc.start:block_loc.end],
+                attention_mask=attn_mask[:,block_loc.start: block_loc.end,:block_loc.end],
+                use_cache=True,
+                past_key_values=past_key_values,
+                replace_position=replace_position)
+            logits = output.logits
+            # TODO(dulun): we don't need update kv cache for every step.
+            kv_cache.update(output.past_key_values)
+            
+        decoder.decode(logits, block_loc.start, block_loc.end, x)
+        self.num_forwards += 1
+        self.iter_no += 1
+
 
 class ShiftDiffusionIteration(DiffusionIteration):
     """ A shift implementation of diffusion iteration to decode.
@@ -581,4 +734,148 @@ class BlockWiseDiffusionLLMWithSP(DiffusionLLM):
                         self.rank, self.world_size)
                 self.decoder.decode(logits, block_loc.start, block_loc.end, x)
                 self.num_forwards += 1
+        return x.get_generated_tokens()
+
+class BlockDiffusionLLMAttnmask(DiffusionLLM):
+    """ Diffusion LLM inference
+
+    This diffusion LLM inference generates tokens block by block with the implementation of Attention Mask.
+
+    Comparing to the BlockWiseDiffusionLLM, this one does not feed the subsequent blocks 
+    (which consist only of mask tokens) into the transformer when generating the earlier blocks, 
+    thereby reducing overhead.
+
+    Parameters
+    ----------
+    model : Torch.Module
+        The LLM model
+    decoder : ParallelDecoder
+        The decoder that decodes the tokens from the logits computed by the Transformer model
+    iterator_facotry : IteratorFactory
+        The factory class that generates the iterator on the input token array.
+
+    """
+    def __init__(self, model, decoder, iterator_factory, early_stop=True, maximum_unroll=4, expected_tpf=8):
+        self.model = model
+        self.decoder = decoder
+        self.iterator_factory = iterator_factory
+        self.diff_iteration = BlockDiffusionIteration()
+        self.block_runner = BlockDiffusionRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        
+
+    @property
+    def num_forwards(self):
+        return self.diff_iteration.num_forwards
+
+    @property
+    def cache_updates(self):
+        return 0
+
+    @ torch.no_grad()
+    def generate(self, prompt, gen_length=128, block_length=128):
+        ''' Generate tokens with diffusion iterations block by block.
+        '''
+        assert prompt.shape[0] == 1, "We currently only support batch size = 1."
+        # recalculate gen length and init iteratory
+        # TODO(dulun): the implementation align with original bd decoder implementation.
+        # We may need to refine to let users control the gen_length.
+        prompt_length=prompt.shape[1]
+        num_blocks = (prompt_length + gen_length + block_length - 1) // block_length
+        total_length = num_blocks * block_length
+        new_gen_length=total_length-prompt_length
+        
+        
+        # prepare block_mask and position IDs
+        block_mask = torch.tril(torch.ones(num_blocks, num_blocks, device=self.model.device))
+        bd_attn_mask = block_mask.repeat_interleave(block_length, dim=0)\
+                                        .repeat_interleave(block_length, dim=1).unsqueeze(0)
+        pos_ids = torch.arange(total_length, device=self.model.device).unsqueeze(0)
+
+
+        x = TokenArray(prompt, new_gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
+        it = self.iterator_factory.create(x, block_length)
+
+        # We need to reset iter_no at the beginning of generating a sequence.
+        self.diff_iteration.iter_no = 0
+        # We don't need kv_cache for the implementation of attention mask
+        kv_cache = None
+        for block_id, (block_loc, block) in enumerate(it):
+            self.decoder.block_init(block, block_id)
+            decode_compl = self.block_runner.decode(self.model, self.decoder, x, kv_cache, block, block_loc, block_id, 
+                pos_ids, bd_attn_mask)
+            if decode_compl:
+                break
+        logger.info(f'The number of diffusion iterations: {self.num_forwards}')
+        return x.get_generated_tokens()
+
+class BlockDiffusionLLM(DiffusionLLM):
+    """ Diffusion LLM inference
+
+    This diffusion LLM inference generates tokens block by block with the implementation of KV-Cache
+
+    Comparing to the BlockWiseDiffusionLLM, this one does not feed the subsequent blocks 
+    (which consist only of mask tokens) into the transformer when generating the earlier blocks, 
+    thereby reducing overhead.
+
+    Parameters
+    ----------
+    model : Torch.Module
+        The LLM model
+    decoder : ParallelDecoder
+        The decoder that decodes the tokens from the logits computed by the Transformer model
+    iterator_facotry : IteratorFactory
+        The factory class that generates the iterator on the input token array.
+
+    """
+    def __init__(self, model, decoder, iterator_factory, cache_factory, early_stop=True, maximum_unroll=4, expected_tpf=8):
+        self.model = model
+        self.decoder = decoder
+        self.iterator_factory = iterator_factory
+        self.cache_factory = cache_factory
+        self.diff_iteration = BlockDiffusionIteration()
+        self.block_runner = BlockDiffusionRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        
+
+    @property
+    def num_forwards(self):
+        return self.diff_iteration.num_forwards
+
+    @property
+    def cache_updates(self):
+        return self.diff_iteration.cache_updates
+
+    @ torch.no_grad()
+    def generate(self, prompt, gen_length=128, block_length=128):
+        ''' Generate tokens with diffusion iterations block by block.
+        '''
+        assert prompt.shape[0] == 1, "We currently only support batch size = 1."
+        # recalculate gen length and init iteratory
+        # TODO(dulun): the implementation align with original bd decoder implementation.
+        # We may need to refine to let users control the gen_length.
+        prompt_length=prompt.shape[1]
+        num_blocks = (prompt_length + gen_length + block_length - 1) // block_length
+        total_length = num_blocks * block_length
+        new_gen_length=total_length-prompt_length
+
+        # prepare block_mask and position IDs
+        block_mask = torch.tril(torch.ones(num_blocks, num_blocks, device=self.model.device))
+        bd_attn_mask = block_mask.repeat_interleave(block_length, dim=0)\
+                                        .repeat_interleave(block_length, dim=1).unsqueeze(0)
+        pos_ids = torch.arange(total_length, device=self.model.device).unsqueeze(0)
+
+        x = TokenArray(prompt, new_gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
+        it = self.iterator_factory.create(x, block_length)
+        kv_cache = self.cache_factory.create()
+
+        # prefill for kv_cache
+        self.block_runner.prefill(self.model, x[:prompt_length], kv_cache, pos_ids[:, :prompt_length], bd_attn_mask[:,:prompt_length,:prompt_length])
+        
+        # We need to reset iter_no at the beginning of generating a sequence.
+        self.diff_iteration.iter_no = 0
+        for block_id, (block_loc, block) in enumerate(it):
+            self.decoder.block_init(block, block_id)
+            decode_compl = self.block_runner.decode(self.model, self.decoder, x, kv_cache, block, block_loc, block_id, pos_ids, bd_attn_mask)
+            if decode_compl:
+                break
+        logger.info(f'The number of diffusion iterations: {self.num_forwards}')
         return x.get_generated_tokens()

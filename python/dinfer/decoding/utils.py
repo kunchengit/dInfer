@@ -150,6 +150,8 @@ class BlockLoc:
         self.start = start
         self.end = end
 
+
+
 class BlockIterator:
     """ Block iterator
 
@@ -192,6 +194,38 @@ class BlockIterator:
         self.iter += 1
         return BlockLoc(current_block_start, current_block_end), self.x[current_block_start:current_block_end]
 
+class BlockDiffusionIterator():
+    """ Block iterator
+
+    This performs block-wise iteration on the input token array for diffusion decoding.
+
+    Parameters
+    ----------
+    x : TokenArray
+        The token array that contains decoded tokens and stores the new generated tokens
+    block_length : int
+        The length of the block
+    """
+    def __init__(self, x, block_length):
+        self.x = x
+        self.iter = 0
+        self.block_length = block_length
+        self.first_block_start = x.prompt.shape[1] // block_length * block_length
+    
+    def __iter__(self):
+        self.iter = 0
+        return self
+
+    def __next__(self):
+        current_block_start = self.first_block_start + self.iter * self.block_length
+        if current_block_start >= self.x.total_length:
+            raise StopIteration
+        current_block_end = min(current_block_start + self.block_length, self.x.total_length)
+        assert current_block_end <= self.x.total_length
+        self.iter += 1
+        return BlockLoc(current_block_start, current_block_end), self.x[current_block_start:current_block_end]
+
+
 class BlockIteratorFactory:
     """ Iterator factory
 
@@ -199,20 +233,25 @@ class BlockIteratorFactory:
 
     Parameters
     ----------
-    x : torch.Tensor
-        The sequence to iterate over when diffusion LLM generates tokens
-    block_length : int
-        The block length
+    start_block_align : bool
+        Align the first decoding block to the block size. The first block may overlap with the prompt.
+    
+    use_block_diffusion: bool
+        If this flag set to True, the block diffusion iteration will be used and start_block_algin will be ignored.
 
     Returns
     -------
     BlockIterator : the block iterator.
     """
-    def __init__(self, start_block_align=False):
+    def __init__(self, start_block_align=False, use_block_diffusion=False):
         self._start_block_align = start_block_align
+        self._use_bd = use_block_diffusion
 
     def create(self, x, block_length):
-        return BlockIterator(x, block_length, start_block_align=self._start_block_align)
+        if self._use_bd:
+            return BlockDiffusionIterator(x, block_length)
+        else:
+            return BlockIterator(x, block_length, start_block_align=self._start_block_align)
 
 class KVCache:
     """ The KV-cache
@@ -375,17 +414,45 @@ class DiffusionKVCacheManager:
             replace_position = (block_start, block_end)
         return self.past_key_values, replace_position
 
+class BlockDiffusionPrefixCacheManager(DiffusionKVCacheManager):
+    """
+     KVcache manager of block diffusion.
+    """
+
+    def get_key_values(self, block_start, block_end):
+        # use prefix cache for block diffusion.
+        return self.past_key_values, (block_start, block_end)
+
+    def extend_cache(self, end):
+        """
+        When move to new block, extend the kvcache length from previous block end to new block end location.
+
+        Parameters
+        ----------
+        length : int
+            The extended length (equvelent to block length)
+        
+        """
+        cur_kv_length = self.past_key_values._data.shape[-2]
+        extended_cache = F.pad(self.past_key_values._data, pad=(0, 0, 0, end-cur_kv_length), mode='constant', value=0)
+        self.past_key_values._data = extended_cache
+
+
 class KVCacheFactory:
     """ KV-cache factory.
 
     This class generates KV-cache for the diffusion LLM when it runs diffusion iterations.
     """
-    def __init__(self, cache_type, cache_update_freq=None):
+    def __init__(self, cache_type, cache_update_freq=None, is_bd_model=False):
         self.cache_type = cache_type
         self.cache_update_freq = cache_update_freq
+        self.is_bd_model=is_bd_model
 
     def create(self):
-        return DiffusionKVCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type)
+        if self.is_bd_model:
+            return BlockDiffusionPrefixCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type)
+        else:
+            return DiffusionKVCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type)
 
 def gather_sequence_block(partial_data, partial_start, partial_end, block_start, block_end, rank, world_size):
     """ Gather the wanted block data from the partitioned data.
