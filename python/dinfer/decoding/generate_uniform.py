@@ -32,6 +32,19 @@ class DiffusionLLM:
             EOS and any tokens after EOS have been removed.
         '''
 
+def select_undecoded(seq_idx, orig_x, x, block, block_loc, mask_id, writeback=False):
+    if x.batch_size == 1:
+        return seq_idx, x
+    bool_idx = torch.all(block != mask_id, dim=1)
+
+    if writeback:
+        # Write the decoded tokens back
+        finished_idx = seq_idx[bool_idx]
+        orig_x[finished_idx, block_loc.start:block_loc.end] = block[bool_idx]
+
+    # Select the undecoded sequences
+    return seq_idx, x
+
 class BlockRunner:
     """ The class decodes all tokens in a block
 
@@ -66,7 +79,7 @@ class BlockRunner:
         kv_cache: KVCache
             The KV-cache
         block : torch.Tensor
-            The input IDs of the tokens in the current decoding block.
+            The input tokens in the block.
         block_loc : BlockLoc
             The start and the end of the location of the decoding block.
         block_id : int
@@ -74,20 +87,35 @@ class BlockRunner:
 
         Returns
         -------
-        bool : whether we have decoded all tokens in the sequence.
+        torch.Tensor : a bool tensor that indicates whether the sequences have finished decoding.
         """
+        orig_x = x
+        seq_idx = torch.arange(x.batch_size, device=block.device)
+        seq_idx, x = select_undecoded(seq_idx, orig_x, x, block, block_loc, decoder.mask_id, writeback=False)
+        block = x[:, block_loc.start:block_loc.end]
+        batch_size = x.batch_size
         while (block == decoder.mask_id).sum() > 0:
+            # TODO(zhengda) we need to consider the batch size.
             unroll_k = max(min((block == decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 1)
             for unroll_i in range(unroll_k):
                 self.diff_iteration.forward(model, decoder, x, kv_cache, block, block_loc, block_id)
 
-        if self.early_stop and torch.any(x[block_loc.start:block_loc.end] == decoder.eos_id):
+            # If there are more than one sequence, we should filter the sequences and only decode
+            # on the sequences that still have masked tokens.
+            if batch_size > 1:
+                seq_idx, x = select_undecoded(seq_idx, orig_x, x, block, block_loc, decoder.mask_id, writeback=True)
+                block = x[:, block_loc.start:block_loc.end]
+                # If all blocks have been decoded, we can jumpt out.
+                if len(seq_idx) == 0:
+                    break
+            batch_size = x.batch_size
+
+        eos_idx = torch.any(orig_x[:, block_loc.start:block_loc.end] == decoder.eos_id, dim=1)
+        if self.early_stop:
             # Find the first location of EOS and set all tokens after the location to EOS.
             # Here we assume that don't perform remasking.
-            # TODO(zhengda) here we assume the batch size is 1.
-            x[block_loc.end:] = decoder.eos_id
-            return True
-        return False
+            orig_x[eos_idx, block_loc.end:] = decoder.eos_id
+        return eos_idx
 
 class BlockDiffusionRunner(BlockRunner):
     """ The class decodes all tokens in a block
@@ -224,9 +252,11 @@ class BaseDiffusionIteration(DiffusionIteration):
         block_id : int
             The block ID
         """
+        cache_update_kv = None
         # Update KV-cache
         if kv_cache is not None and kv_cache.require_update(self.iter_no, block_loc.start, block_loc.end):
             output = model(x.data, use_cache=True)
+            cache_update_kv = output.past_key_values
             self.num_forwards += 1
             # use the generated output to decode.
             decoder.decode(output.logits[:, block_loc.start:block_loc.end], block_loc.start, block_loc.end, x)
@@ -238,7 +268,7 @@ class BaseDiffusionIteration(DiffusionIteration):
             logits = model(x.data).logits[:, block_loc.start:block_loc.end]
         elif kv_cache.cache_type == 'prefix':
             past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
-            logits = model(x[block_loc.start:], past_key_values=past_key_values, use_cache=True,
+            logits = model(x[:, block_loc.start:], past_key_values=past_key_values, use_cache=True,
                     replace_position=replace_position).logits
             block_length = block_loc.end - block_loc.start
             logits = logits[:, :block_length]
@@ -247,10 +277,11 @@ class BaseDiffusionIteration(DiffusionIteration):
             # cache position is the position between current_block_start and current_block_end
             logits = model(block, past_key_values=past_key_values, use_cache=True,
                     replace_position=replace_position).logits
-        
+
         decoder.decode(logits, block_loc.start, block_loc.end, x)
         self.num_forwards += 1
         self.iter_no += 1
+        return cache_update_kv, logits
 
 class BlockDiffusionIteration:
     """ An implementation of block diffusion iteration to decode.
@@ -357,14 +388,14 @@ class ShiftDiffusionIteration(DiffusionIteration):
             logits = model(x.data).logits[:, block_start:block_end]
         elif kv_cache.cache_type == 'prefix':
             past_key_values, replace_position = kv_cache.get_key_values(block_start, block_end)
-            logits = model(x[block_start:], past_key_values=past_key_values, use_cache=True,
+            logits = model(x[:, block_start:], past_key_values=past_key_values, use_cache=True,
                     replace_position=replace_position).logits
             block_length = block_end - block_start
             logits = logits[:, :block_length]
         else:
             # cache position is the position between current_block_start and current_block_end
             past_key_values, replace_position = kv_cache.get_key_values(block_start, block_end)
-            logits = model(x[block_start:block_end], past_key_values=past_key_values, use_cache=True,
+            logits = model(x[:, block_start:block_end], past_key_values=past_key_values, use_cache=True,
                     replace_position=replace_position).logits
         # TODO(dulun): need to improve efficiency
         x_shifted = TokenArray(x.data[:, 1:], 0, decoder.mask_id, decoder.eos_id, model.device)
@@ -418,7 +449,6 @@ class BlockWiseDiffusionLLM(DiffusionLLM):
     def generate(self, prompt, gen_length=128, block_length=128):
         ''' Generate tokens with diffusion iterations block by block.
         '''
-        assert prompt.shape[0] == 1, "We currently only support batch size = 1."
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 
@@ -428,7 +458,8 @@ class BlockWiseDiffusionLLM(DiffusionLLM):
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
             decode_compl = self.block_decoder.decode(self.model, self.decoder, x, kv_cache, block, block_loc, block_id)
-            if decode_compl:
+            # If all sequences have EOS, we have finished decoding.
+            if torch.all(decode_compl):
                 break
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
         return x.get_generated_tokens()
@@ -727,8 +758,8 @@ class BlockWiseDiffusionLLMWithSP(DiffusionLLM):
             while (block == self.decoder.mask_id).sum()>0:
                 part = x.total_length // self.world_size
                 # TODO(zhengda) How does the model collect KV from other processes.
-                partial_logits = self.model(x[(self.rank * part):((self.rank + 1) * part)].clone()).logits
-                op_num += calculate_op_num(x[self.rank*part:(self.rank+1)*part])
+                partial_logits = self.model(x[:, (self.rank * part):((self.rank + 1) * part)].clone()).logits
+                op_num += calculate_op_num(x[:, self.rank*part:(self.rank+1)*part])
 
                 logits = gather_sequence_block(partial_logits, self.rank * part, (self.rank + 1) * part, block_loc.start, block_loc.end,
                         self.rank, self.world_size)

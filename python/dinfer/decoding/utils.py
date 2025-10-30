@@ -1,4 +1,5 @@
 import math
+import copy
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -64,15 +65,20 @@ class TokenArray:
         The device where the token array is placed on.
     """
     def __init__(self, prompt, gen_length, mask_id, eos_id, device):
-        self.prompt = prompt
-        self.data = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(device)
+        self.prompt = prompt.to(device)
+        self.data = torch.full((prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(device)
         self.data[:, :prompt.shape[1]] = prompt.clone()
         self.gen_length = gen_length
         self.eos_id = eos_id
+        self.mask_id = mask_id
 
     @property
     def total_length(self):
         return self.prompt.shape[1] + self.gen_length
+
+    @property
+    def batch_size(self):
+        return self.prompt.shape[0]
 
     @property
     def device(self):
@@ -82,13 +88,22 @@ class TokenArray:
         pass
 
     def get_generated_tokens(self):
-        return self.data[self.data != self.eos_id].unsqueeze(0)
+        if self.batch_size == 1:
+            return self.data[self.data != self.eos_id].unsqueeze(0)
+        else:
+            return self.data
+
+    def select_seqs(self, idx):
+        arr = copy.copy(self)
+        arr.prompt = self.prompt[idx]
+        arr.data = self.data[idx]
+        return arr
 
     def __getitem__(self, idx):
-        return self.data[:, idx]
+        return self.data[idx]
 
     def __setitem__(self, idx, vals):
-        self.data[:, idx] = vals
+        self.data[idx] = vals
 
 class DistAlignedTokenArray:
     """ A token array to support read, update and expansion in the distributed setting.
@@ -122,6 +137,7 @@ class DistAlignedTokenArray:
         self.gen_length = total_length - prompt.shape[1]
         self.prompt = prompt
         self.eos_id = eos_id
+        self.mask_id = mask_id
 
     @property
     def total_length(self):
@@ -138,10 +154,10 @@ class DistAlignedTokenArray:
         pass
 
     def __getitem__(self, idx):
-        return self.data[:, idx]
+        return self.data[idx]
 
     def __setitem__(self, idx, vals):
-        self.data[:, idx] = vals
+        self.data[idx] = vals
 
 class BlockLoc:
     """ The location of the block in the token array.
@@ -177,9 +193,10 @@ class BlockIterator:
             self.first_block_start = self.x.prompt.shape[1]
 
     def _get_first_block_start(self):
-        gen_len = self.x.total_length - self.x.prompt.shape[1]
-        left_align = ((gen_len + self.block_length - 1) // self.block_length) * self.block_length - gen_len
-        return self.x.prompt.shape[1] - left_align
+        prompt = self.x.prompt
+        non_mask_number = (prompt != self.x.mask_id).sum(dim=-1).min()
+        start = ((non_mask_number - self.block_length + 1) // self.block_length) * self.block_length
+        return start
 
     def __iter__(self):
         self.iter = 0
@@ -192,7 +209,7 @@ class BlockIterator:
         current_block_end = min(current_block_start + self.block_length, self.x.total_length)
         assert current_block_end <= self.x.total_length
         self.iter += 1
-        return BlockLoc(current_block_start, current_block_end), self.x[current_block_start:current_block_end]
+        return BlockLoc(current_block_start, current_block_end), self.x[:, current_block_start:current_block_end]
 
 class BlockDiffusionIterator():
     """ Block iterator

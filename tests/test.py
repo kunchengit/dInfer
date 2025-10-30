@@ -18,8 +18,10 @@ from dinfer import DiffusionLLMServing, SamplingParams
 from dinfer.model.modeling_llada_fastdllm import LLaDAModelLM as LLaDAModelLM_fastdllm
 from dinfer.decoding.generate_fastdllm import generate, generate_with_prefix_cache, generate_with_dual_cache
 from dinfer.decoding.generate_dist import generate as generate_sp
+from dinfer.decoding.generate_uniform import BaseDiffusionIteration
 from dinfer.decoding.generate_hierarchy import generate_hierarchy
 from dinfer.decoding.utils import TokenArray, DistAlignedTokenArray, BlockIterator, BlockIteratorFactory, KVCacheFactory, gather_sequence_block, BlockLoc
+from dinfer.decoding.utils import DiffusionKVCacheManager
 from dinfer.decoding.generate_merge import generate_merge
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
@@ -46,13 +48,13 @@ def test_token_array():
     prompt = torch.tensor([1, 2, 3, 4, 5, 6, 7]).view(1, 7)
     arr = TokenArray(prompt, gen_length=20, mask_id=17, eos_id=18, device='cpu')
     assert arr.total_length == prompt.shape[1] + 20
-    assert torch.all(arr[0:5] == prompt[:, 0:5])
-    arr[8:10] = torch.tensor([9, 10]).view(1, 2)
+    assert torch.all(arr[:, 0:5] == prompt[:, 0:5])
+    arr[:, 8:10] = torch.tensor([9, 10]).view(1, 2)
 
     arr = DistAlignedTokenArray(prompt, gen_length=20, mask_id=17, eos_id=18, device='cpu', rank=0, world_size=4)
     assert arr.total_length == prompt.shape[1] + 20 + 1
-    assert torch.all(arr[0:5] == prompt[:, 0:5])
-    arr[8:10] = torch.tensor([9, 10]).view(1, 2)
+    assert torch.all(arr[:, 0:5] == prompt[:, 0:5])
+    arr[:, 8:10] = torch.tensor([9, 10]).view(1, 2)
 
 class SimulateBlockIterator:
     """ This class simulates the block iterator in VicinityCacheDiffusionLLM.
@@ -72,7 +74,7 @@ class SimulateBlockIterator:
         current_block_end = current_block_start + self.block_length
         current_block_end = min(current_block_end, self.x.total_length)
         # If all tokens have been decoded, move to the next block.
-        if torch.all(self.x[current_block_start:current_block_end] != self.mask_id):
+        if torch.all(self.x[:, current_block_start:current_block_end] != self.mask_id):
             self.iter += 1
 
     def __next__(self):
@@ -82,12 +84,59 @@ class SimulateBlockIterator:
             raise StopIteration
         current_block_end = current_block_start + self.block_length
         current_block_end = min(current_block_end, self.x.total_length)
-        return BlockLoc(current_block_start, current_block_end), self.x[current_block_start:current_block_end]
+        return BlockLoc(current_block_start, current_block_end), self.x[:, current_block_start:current_block_end]
 
 class SimulateBlockIteratorFactory:
     def create(self, x, block_length):
         return SimulateBlockIterator(x, block_length, 126336)
 
+def get_prompts(tokenizer, mask_id, device, num=1):
+    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
+    m = [{"role": "user", "content": prompt}, ]
+    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+    input_ids1 = torch.tensor(tokenizer(prompt)['input_ids']).to(device).unsqueeze(0)
+    len1 = input_ids1.shape[1]
+
+    if num == 2:
+        prompt = "Lily can run 12 kilometers per hour for 4 hours. How many kilometers can she run in 4 hours? "
+        m = [{"role": "user", "content": prompt}, ]
+        prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
+        input_ids2 = torch.tensor(tokenizer(prompt)['input_ids']).to(device).unsqueeze(0)
+        len2 = input_ids2.shape[1]
+        ret = torch.zeros(2, max(len1, len2), dtype=input_ids1.dtype)
+        ret[0, 0:len1] = input_ids1
+        ret[1, 0:len2] = input_ids2
+    else:
+        ret = input_ids1
+
+    return ret
+
+@ torch.no_grad()
+def check_iteration(model, decoder, input_ids):
+    print('check_iteration start')
+    x1 = TokenArray(input_ids, 256, decoder.mask_id, decoder.eos_id, model.device)
+    x2 = TokenArray(torch.cat([input_ids, input_ids]), 256, decoder.mask_id, decoder.eos_id, model.device)
+    kv_cache1 = DiffusionKVCacheManager(cache_type='dual')
+    kv_cache2 = DiffusionKVCacheManager(cache_type='dual')
+    it1 = BlockIterator(x1, 32)
+    it2 = BlockIterator(x2, 32)
+    diff_iter1 = BaseDiffusionIteration()
+    diff_iter2 = BaseDiffusionIteration()
+    model = model.to(torch.float32)
+    for block_id, ((block_loc1, block1), (block_loc2, block2)) in enumerate(zip(it1, it2)):
+        output1 = model(x1.data, use_cache=True, output_hidden_states=True)
+        output2 = model(x2.data, use_cache=True, output_hidden_states=True)
+        for i in range(16):
+            assert torch.all(output1.past_key_values._data[i] == output2.past_key_values._data[i][0])
+            assert torch.all(output1.hidden_states[i][0] == output2.hidden_states[i][0]), output1.hidden_states[i][0] - output2.hidden_states[i][0]
+
+        updated_cache1, logits1 = diff_iter1.forward(model, decoder, x1, kv_cache1, block1, block_loc1, block_id)
+        updated_cache2, logits2 = diff_iter2.forward(model, decoder, x2, kv_cache2, block2, block_loc2, block_id)
+        assert torch.all(logits1 == logits2)
+        for layer_id, (layer1, layer2) in enumerate(zip(kv_cache1.past_key_values._data, kv_cache2.past_key_values._data)):
+            assert torch.all(layer1 == layer2)
+        assert torch.all(x1.data[0] == x2.data[0])
+    print('check_iteration end')
 
 def test_moe_diffusion():
     torch.cuda.set_device(0)
@@ -96,12 +145,7 @@ def test_moe_diffusion():
     decoder = ThresholdParallelDecoder(0, threshold=0.9, mask_id=156895, eos_id=156892, use_float64=True)
     h_decoder = HierarchyDecoder(0, threshold=0.9, mask_id=156895, eos_id=156892, low_threshold=0.4)
     tokenizer = AutoTokenizer.from_pretrained(moe_model_path, trust_remote_code=True)
-    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
-    m = [{"role": "user", "content": prompt}, ]
-    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
-    input_ids = tokenizer(prompt)['input_ids']
-    batch_size = 1
-    input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
+    input_ids = get_prompts(tokenizer, mask_id=156895, device=device)
 
     from vllm import distributed
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -118,6 +162,9 @@ def test_moe_diffusion():
         tokenizer = AutoTokenizer.from_pretrained(moe_model_path, trust_remote_code=True)
         model = model.to(device)
 
+        # Test diffusion iteration.
+        check_iteration(model, decoder, input_ids)
+
         # Test generation without cache.
         print('Test block-wise diffusion MOE-LLM without KV-cache')
         dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True)
@@ -132,6 +179,22 @@ def test_moe_diffusion():
         res2 = res2.to(res.device)
         assert torch.all(res == res1)
         assert torch.all(res == res2)
+
+        # Test generation without cache with batch size == 2.
+        print('Test block-wise diffusion MOE-LLM without KV-cache and batch size == 2')
+        input_ids2 = get_prompts(tokenizer, mask_id=156895, device=device, num=2)
+        res11 = dllm.generate(input_ids2[0].unsqueeze(0), gen_length=128, block_length=32)
+        res12 = dllm.generate(input_ids2[1].unsqueeze(0), gen_length=128, block_length=32)
+        res2 = dllm.generate(input_ids2, gen_length=128, block_length=32)
+        assert res2.shape[0] == 2
+        res21 = res2[0]
+        res22 = res2[1]
+        res21 = res21[res21 != 156892]
+        res22 = res22[res22 != 156892]
+        assert res11.shape[1] == len(res21)
+        assert res12.shape[1] == len(res22)
+        assert torch.all(res11[0] == res21)
+        assert torch.all(res12[0] == res22)
 
         # Test generation with iteration smooth without kv-cache.
         print('Test block-wise diffusion MOE-LLM with iteration smooth without kv-cache')
@@ -154,6 +217,21 @@ def test_moe_diffusion():
         assert res.shape[1] == len(res1)
         res1 = res1.to(res.device)
         assert torch.all(res == res1)
+
+        # Test generation with dual cache with batch size == 2
+        print('Test block-wise diffusion MOE-LLM with dual KV-cache and batch size == 2')
+        dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(), early_stop=True, cache_factory=KVCacheFactory('dual'))
+        input_ids2 = get_prompts(tokenizer, mask_id=156895, device=device, num=2)
+        res2 = dllm.generate(input_ids2, gen_length=256, block_length=32)
+        assert res2.shape[0] == 2
+        res21 = res2[0]
+        res22 = res2[1]
+        res21 = res21[res21 != 156892]
+        res22 = res22[res22 != 156892]
+        assert res1.shape[0] == len(res21)
+        assert res1.shape[0] == len(res22)
+        assert torch.all(res1 == res21)
+        assert torch.all(res1 == res22)
 
         # Test generation with iteration smooth with kv-cache.
         print('Test block-wise diffusion MOE-LLM with iteration smooth with kv-cache')
@@ -208,10 +286,7 @@ def test_diffusion():
     decoder = ThresholdParallelDecoder(0, threshold=0.9, use_float64=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
-    m = [{"role": "user", "content": prompt}, ]
-    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
-    input_ids = tokenizer(prompt)['input_ids']
+    input_ids = get_prompts(tokenizer, mask_id=126336, device=device)
     batch_size = 1
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
 
@@ -334,10 +409,7 @@ def check_diffusion_worker(rank, world_size, gpu):
     model = model.to(device)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
-    m = [{"role": "user", "content": prompt}, ]
-    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
-    input_ids = tokenizer(prompt)['input_ids']
+    input_ids = get_prompts(tokenizer, mask_id=126336, device=device)
     batch_size = 1
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0).repeat(batch_size, 1)
 
@@ -370,10 +442,7 @@ def test_moe_server(require_init=True):
     params = SamplingParams(temperature=0, threshold=0.9, mask_id=156895, eos_id=156892, early_stop=True, cache='', cont_weight=0, enable_torch_compile=True)
 
     tokenizer = AutoTokenizer.from_pretrained(moe_model_path, trust_remote_code=True)
-    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
-    m = [{"role": "user", "content": prompt}, ]
-    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
-    input_ids = tokenizer(prompt)['input_ids']
+    input_ids = get_prompts(tokenizer, mask_id=156895, device=device)
     input_ids = torch.tensor(input_ids).unsqueeze(0)
 
     device = torch.device(0)
@@ -440,10 +509,7 @@ def test_server():
     params = SamplingParams(temperature=0, threshold=0.9, mask_id=126336, eos_id=126081, early_stop=True, cache='', cont_weight=0, enable_torch_compile=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    prompt = "Lily can run 12 kilometers per hour for 4 hours. After that, she can run 6 kilometers per hour. How many kilometers can she run in 8 hours? "
-    m = [{"role": "user", "content": prompt}, ]
-    prompt = tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
-    input_ids = tokenizer(prompt)['input_ids']
+    input_ids = get_prompts(tokenizer, mask_id=126336, device=device)
     input_ids = torch.tensor(input_ids).unsqueeze(0)
 
     torch.cuda.set_device(0)
@@ -471,13 +537,14 @@ def test_server():
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     logging.basicConfig(level=logging.INFO)
+
+    test_token_array()
+    test_block_iterator()
+
     test_moe_diffusion()
     test_diffusion()
     test_server()
     test_moe_server(False)
-
-    test_token_array()
-    test_block_iterator()
 
     test_dist()
     test_diffusion_sp()

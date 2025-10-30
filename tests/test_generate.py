@@ -91,11 +91,11 @@ class IterSmoothDiffusionLLM(DiffusionLLM):
 
                     iter_no += 1
 
-            if self.early_stop and torch.any(x[block_loc.start:block_loc.end] == self.decoder.eos_id):
+            if self.early_stop and torch.any(x[:, block_loc.start:block_loc.end] == self.decoder.eos_id):
                 # Find the first location of EOS and set all tokens after the location to EOS.
                 # Here we assume that don't perform remasking.
                 # TODO(zhengda) here we assume the batch size is 1.
-                x[block_loc.end:] = self.decoder.eos_id
+                x[:, block_loc.end:] = self.decoder.eos_id
                 break
 
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
@@ -148,7 +148,7 @@ class IterSmoothWithVicinityCacheDiffusionLLM(DiffusionLLM):
             right_end = min(total_len, block_end + self.after_look)
 
             iter_in_block = 0
-            while (x[block_start:block_end] == self.decoder.mask_id).sum() > 0:
+            while (x[:, block_start:block_end] == self.decoder.mask_id).sum() > 0:
                 unroll_k = max(min((block == self.decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 1)
                 for unroll_i in range(unroll_k):
                     iter_cont_weight = min(self.cont_weight_init+self.cont_weight_growth*iter_no, self.cont_weight)
@@ -196,8 +196,8 @@ class IterSmoothWithVicinityCacheDiffusionLLM(DiffusionLLM):
 
                     iter_in_block += 1
 
-            if self.early_stop and torch.any(x[block_start:block_end] == self.decoder.eos_id):
-                x[block_end:] = self.decoder.eos_id
+            if self.early_stop and torch.any(x[:, block_start:block_end] == self.decoder.eos_id):
+                x[:, block_end:] = self.decoder.eos_id
                 break
 
         logger.info(f'The number of diffusion iterations with kv-cache: {self.num_forwards}')

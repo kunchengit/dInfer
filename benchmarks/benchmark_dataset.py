@@ -11,7 +11,7 @@ from vllm.config import VllmConfig, set_current_vllm_config, get_current_vllm_co
 from vllm.forward_context import set_forward_context
 import json
 
-from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM
+from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM, BailingMoeV2ForCausalLM
 from dinfer import BlockIteratorFactory, KVCacheFactory
 from dinfer import ThresholdParallelDecoder,CreditThresholdParallelDecoder, HierarchyDecoder, BlockWiseDiffusionLLM, IterSmoothDiffusionLLM, VicinityCacheDiffusionLLM, IterSmoothWithVicinityCacheDiffusionLLM
 
@@ -82,6 +82,14 @@ def warmup_cudagraph(rank, device, dllm, args):
         input_ids = torch.randint(0, 140000, (1, i - args.gen_len+offset), dtype=torch.long, device=device)
         dllm.generate(input_ids, gen_length=args.gen_len-offset, block_length=args.block_length)
 
+def cut_eos(data, eos_id=156892):
+    eos_indices = (data[0] == eos_id).nonzero(as_tuple=True)[0]
+    if eos_indices.numel() > 0:
+        first_eos_idx = eos_indices[0].item()
+        return data[:, :first_eos_idx]
+    else:
+        return data
+
 @ torch.no_grad()
 def main(world_size, rank, gpu_id, args):
     print('started', world_size, rank, gpu_id, args)
@@ -109,7 +117,12 @@ def main(world_size, rank, gpu_id, args):
         print("EP Enabled:", vllm_config.parallel_config.enable_expert_parallel)
 
         model_config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=True)
-        model = FusedOlmoeForCausalLM(config=model_config).eval()
+        if args.model_type=='moe':
+            model = FusedOlmoeForCausalLM(config=model_config).eval()
+        elif args.model_type=='mini':
+            model = BailingMoeV2ForCausalLM(config=model_config).eval()
+        else:
+            model = LLaDAModelLM(config=model_config).eval()
         model.load_weights(args.model_name, torch_dtype=torch.bfloat16)
         if args.tp_size>1 and args.use_tp:
             print('enabling tp')
@@ -131,28 +144,31 @@ def main(world_size, rank, gpu_id, args):
         else:
             cache_factory=None
 
-        if args.cont_weight>0:
-            if use_sw:
-                dllm = IterSmoothWithVicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True,
-                    cont_weight=args.cont_weight, prefix_look=args.prefix_look, after_look=args.after_look, warmup_steps=args.warmup_times)
+        if not args.use_bd:
+            if args.cont_weight>0:
+                if use_sw:
+                    dllm = IterSmoothWithVicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True,
+                        cont_weight=args.cont_weight, prefix_look=args.prefix_look, after_look=args.after_look, warmup_steps=args.warmup_times)
+                else:
+                    dllm = IterSmoothDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True, cont_weight=args.cont_weight)
             else:
-                dllm = IterSmoothDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True, cont_weight=args.cont_weight)
+                if use_sw:
+                    dllm = VicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True,
+                        prefix_look=args.prefix_look, after_look=args.after_look, warmup_steps=args.warmup_times)
+                else:
+                    dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True, use_shift=args.use_shift)
         else:
-            if use_sw:
-                dllm = VicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True,
-                    prefix_look=args.prefix_look, after_look=args.after_look, warmup_steps=args.warmup_times)
-            else:
-                dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True)
-            
+            pass            
+        batch_size = args.batch_size
         warmup_cudagraph(rank, device, dllm, args)
 
         for wi in range(1):
             outputs = []
             total_forward = 0
             if rank==0:
-                iterator = tqdm.trange(len(all_input_ids))
+                iterator = tqdm.trange(0, len(all_input_ids), batch_size)
             else:
-                iterator = range(len(all_input_ids))
+                iterator = range(0, len(all_input_ids), batch_size)
             start = time.time()
             tpfs = []
             tpss = []
@@ -160,23 +176,44 @@ def main(world_size, rank, gpu_id, args):
             total_token = 0
             token_numbers = []
             for i in iterator:   
-                input_ids = all_input_ids[i].to(device)
+                input_ids = all_input_ids[i:i+batch_size]
+                max_length = 0
+                min_padded_length = 10000
+                for j, seq in enumerate(input_ids):
+                    # print(j, seq.shape)
+                    if seq.shape[1] > max_length:
+                        max_length = seq.shape[1]
+                        min_padded_length = padded_gen_lens[i+j]
+                batch_input_ids= torch.zeros((len(input_ids), max_length), dtype=torch.long, device=device).fill_(156895)
+                for j in range(len(input_ids)):
+                    batch_input_ids[j, :input_ids[j].shape[1]] = input_ids[j].to(device)
+                input_ids = batch_input_ids
+                # print(input_ids.shape)
                 padded_gen_len = padded_gen_lens[i]
                 inner_start = time.time()
                 prev_forwards = dllm.num_forwards
-                out = dllm.generate(input_ids, gen_length=padded_gen_len, block_length=block_length)
+                out = dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
                 nfe = dllm.num_forwards - prev_forwards
                 inner_stop = time.time()
                 sample_time = inner_stop - inner_start
-                outputs.append(out)
+                for j in range(input_ids.shape[0]):
+                    outputs.append(out[j].unsqueeze(0))
                 total_forward += nfe
-                token_number = out.shape[1] - input_ids.shape[1]
-                token_numbers.append(token_number)
-                tpf = token_number/nfe
-                tps = token_number/sample_time
+                batch_token_number = 0
+                for j in range(input_ids.shape[0]):
+                    token_number = out.shape[1] - all_input_ids[i+j].shape[1]
+                    batch_token_number += token_number
+                    token_numbers.append(token_number)
+                tpf = batch_token_number/nfe/batch_size
+                tps = batch_token_number/sample_time
                 fps = nfe/sample_time
                 if rank == 0:
-                    print(f'iter={i}, fps={fps}, nfe={nfe}')
+                    print(f'[iter {i:4d}]nfe={nfe:4d}, token number={token_number:4d}, fps={fps:4.2f},tpf={tpf:2.2f}, tps={tps:4.2f}')
+                    if wi==0 and i<5:
+                        for j in range(input_ids.shape[0]):
+                            answer = cut_eos(out[j, all_input_ids[i+j].shape[1]:].unsqueeze(0))[0]
+                            # print(answer)
+                            print(f'generated text {j}: {tokenizer.decode(answer, skip_special_tokens=False)}')
                 tpfs.append(tpf)
                 tpss.append(tps)
                 fpss.append(fps)
@@ -199,7 +236,7 @@ def main(world_size, rank, gpu_id, args):
                     prompt = prompts[i]
                     answer = answers[i]
                     id = ids[i]
-                    json.dump({'id':id, 'question':question, 'prompt':prompt, 'answer': answer, 'generated_length': token_numbers[i], 'tpf':tpfs[i], 'tps':tpss[i], 'fps':fpss[i], }, f, indent=4)
+                    json.dump({'id':id, 'question':question, 'prompt':prompt, 'answer': answer, 'generated_length': token_numbers[i], 'tpf':tpfs[i//batch_size], 'tps':tpss[i//batch_size], 'fps':fpss[i//batch_size], }, f, indent=4)
                     f.write('\n')
             with open('results.txt', 'a+') as f:
                 print(args.exp_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look, total_forward, stop-start, total_token / len(all_input_ids), total_forward/(stop-start), total_token/(stop-start), total_token/total_forward, sum(padded_gen_lens)/total_forward, np.mean(fpss), np.mean(tpss), np.mean(tpfs), args.dataset, file=f)
@@ -229,6 +266,9 @@ if __name__ == '__main__':
     parser.add_argument('--cache', type=str, default='')
     parser.add_argument('--use_tp', action='store_true')
     parser.add_argument('--output_dir', type=str, default='/ossfs/workspace/detailed_results_0917')
+    parser.add_argument('--use_shift', action='store_true')
+    parser.add_argument('--use_bd', action='store_true')
+    parser.add_argument('--model_type', type=str, default='mini')
     parser.add_argument('--config', type=int, default=0)
     args = parser.parse_args()
 
