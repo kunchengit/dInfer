@@ -194,8 +194,8 @@ class BlockIterator:
 
     def _get_first_block_start(self):
         prompt = self.x.prompt
-        non_mask_number = (prompt != self.x.mask_id).sum(dim=-1).min()
-        start = ((non_mask_number - self.block_length + 1) // self.block_length) * self.block_length
+        non_mask_number = (prompt != self.x.mask_id).sum(dim=-1).min().item()
+        start = ((non_mask_number) // self.block_length) * self.block_length
         return start
 
     def __iter__(self):
@@ -227,8 +227,14 @@ class BlockDiffusionIterator():
         self.x = x
         self.iter = 0
         self.block_length = block_length
-        self.first_block_start = x.prompt.shape[1] // block_length * block_length
+        self.first_block_start = self._get_first_block_start()
     
+    def _get_first_block_start(self):
+        prompt = self.x.prompt
+        non_mask_number = (prompt != self.x.mask_id).sum(dim=-1).min().item()
+        start = ((non_mask_number) // self.block_length) * self.block_length
+        return start
+
     def __iter__(self):
         self.iter = 0
         return self
@@ -426,9 +432,9 @@ class DiffusionKVCacheManager:
         # self.block_start = block_start
         # self.block_end = block_end
         if self.cache_type == 'prefix':
-            replace_position = (block_start, self.past_key_values.seq_len)
+            replace_position = (int(block_start), int(self.past_key_values.seq_len))
         else:
-            replace_position = (block_start, block_end)
+            replace_position = (int(block_start), int(block_end))
         return self.past_key_values, replace_position
 
 class BlockDiffusionPrefixCacheManager(DiffusionKVCacheManager):
@@ -438,7 +444,7 @@ class BlockDiffusionPrefixCacheManager(DiffusionKVCacheManager):
 
     def get_key_values(self, block_start, block_end):
         # use prefix cache for block diffusion.
-        return self.past_key_values, (block_start, block_end)
+        return self.past_key_values, (int(block_start), int(block_end))
 
     def extend_cache(self, end):
         """

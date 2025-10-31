@@ -1717,7 +1717,7 @@ class LLaDA2MoeModelLM(LLaDA2MoePreTrainedModel, GenerationMixin):
                         filtered_file_state_dict[key] = value
                             
                         
-                state_dict.update(file_state_dict)
+                state_dict.update(filtered_file_state_dict)
 
         new_state_dict = {}
         gate_projs = [{} for _ in range(num_layers)]
@@ -1752,9 +1752,9 @@ class LLaDA2MoeModelLM(LLaDA2MoePreTrainedModel, GenerationMixin):
                 w2_weight = []
                 if 0 in gate_projs[layer_id].keys():
                     for expert_id in range(num_experts//ep_size):
-                        gate_proj = gate_projs[layer_id][expert_id]
-                        up_proj = up_projs[layer_id][expert_id]
-                        down_proj = down_projs[layer_id][expert_id]
+                        gate_proj = gate_projs[layer_id][expert_id].to(device)
+                        up_proj = up_projs[layer_id][expert_id].to(device)
+                        down_proj = down_projs[layer_id][expert_id].to(device)
                         w13_weight.append(torch.cat([gate_proj, up_proj], dim=0))
                         w2_weight.append(down_proj)
                     w13_weight = torch.stack(w13_weight, dim=0)
