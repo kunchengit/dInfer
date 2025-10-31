@@ -14,14 +14,10 @@ import json
 from dinfer.model import FusedOlmoeForCausalLM, LLaDAModelLM, LLaDA2MoeModelLM
 from dinfer import BlockIteratorFactory, KVCacheFactory
 from dinfer import ThresholdParallelDecoder,CreditThresholdParallelDecoder, HierarchyDecoder, BlockWiseDiffusionLLM, IterSmoothDiffusionLLM, VicinityCacheDiffusionLLM, IterSmoothWithVicinityCacheDiffusionLLM, BlockDiffusionLLM
+import random
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-def setup_distributed(rank, world_size):
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '12345'
-    print(f'rank={rank}, world size={world_size}')
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 bucket_size = 32
 used_buckets = []
@@ -47,9 +43,9 @@ def load_inputs(dataset, tokenizer):
     for id, judge_detail in enumerate(details_data):
         ids.append(id)
         prompt = judge_detail['prompt']
-        prompts.append(prompt)
         questions.append(prompt)
         prompt = '<role>SYSTEM</role>detailed thinking off<|role_end|><role>HUMAN</role>'+prompt+'<|role_end|><role>ASSISTANT</role>'   
+        prompts.append(prompt)
 
         input_ids = tokenizer(prompt)['input_ids']
         input_ids = torch.tensor(input_ids).unsqueeze(0)
@@ -101,7 +97,7 @@ def main(world_size, rank, gpu_id, args):
     padded_gen_lens = cal_bucket_len(args, all_input_ids)
 
     block_length=args.block_length
-    dataset_name = args.dataset.split('/')[-1]
+    dataset_name = args.dataset.split('/')[-1][:-5]
     os.makedirs(args.output_dir, exist_ok=True)
 
     from vllm import distributed
@@ -165,36 +161,52 @@ def main(world_size, rank, gpu_id, args):
         else:
             dllm = BlockDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True)
         batch_size = args.batch_size
-        warmup_cudagraph(rank, device, dllm, args)
+
+
+        input_lengths = [inp.size(-1) for inp in all_input_ids]
+        sorted_indices = sorted(range(len(input_lengths)), key=lambda i: input_lengths[i])
+
+        sorted_input_ids = [all_input_ids[i] for i in sorted_indices]
+        sorted_padded_gen_lens = [padded_gen_lens[i] for i in sorted_indices]
+        out = dllm.generate(sorted_input_ids[0], gen_length=sorted_input_ids[-1].shape[1]+sorted_padded_gen_lens[0], block_length=block_length)
 
         for wi in range(1):
             outputs = []
             total_forward = 0
             if rank==0:
-                iterator = tqdm.trange(0, len(all_input_ids), batch_size)
+                iterator = tqdm.trange(0, len(sorted_input_ids), batch_size)
             else:
-                iterator = range(0, len(all_input_ids), batch_size)
+                iterator = range(0, len(sorted_input_ids), batch_size)
             start = time.time()
             tpfs = []
             tpss = []
             fpss = []
             total_token = 0
             token_numbers = []
+            total_time = 0
+            last_prefill_length = -1
             for i in iterator:   
-                input_ids = all_input_ids[i:i+batch_size]
-                max_length = 0
-                min_padded_length = 10000
-                for j, seq in enumerate(input_ids):
-                    # print(j, seq.shape)
-                    if seq.shape[1] > max_length:
-                        max_length = seq.shape[1]
-                        min_padded_length = padded_gen_lens[i+j]
+                input_ids = sorted_input_ids[i:i+batch_size]
+
+                prefill_blocks = input_ids[-1].shape[1] // block_length
+                prefill_length = prefill_blocks * block_length
+
+                max_length = input_ids[-1].shape[1]
+                min_padded_length = padded_gen_lens[i+batch_size-1]
                 batch_input_ids= torch.zeros((len(input_ids), max_length), dtype=torch.long, device=device).fill_(156895)
                 for j in range(len(input_ids)):
                     batch_input_ids[j, :input_ids[j].shape[1]] = input_ids[j].to(device)
                 input_ids = batch_input_ids
-                # print(input_ids.shape)
-                padded_gen_len = padded_gen_lens[i]
+                if prefill_length != last_prefill_length:
+                    if rank==0:
+                        print(f'warmup {i}, prefill length: {prefill_length}, sample length: {sorted_input_ids[i].shape[1]}')
+                    out = dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
+                    out = dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
+                    # out = warmup_dllm.generate(sorted_input_ids[i], gen_length=sorted_padded_gen_lens[i], block_length=block_length)
+                    last_prefill_length = prefill_length
+                    if rank==0:
+                        print(f'warmup finished')
+
                 inner_start = time.time()
                 prev_forwards = dllm.num_forwards
                 out = dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
@@ -204,9 +216,10 @@ def main(world_size, rank, gpu_id, args):
                 for j in range(input_ids.shape[0]):
                     outputs.append(out[j].unsqueeze(0))
                 total_forward += nfe
+                total_time += sample_time
                 batch_token_number = 0
                 for j in range(input_ids.shape[0]):
-                    token_number = int((out[j]!=156892).sum() - all_input_ids[i+j].shape[1])
+                    token_number = int((out[j]!=156892).sum() - sorted_input_ids[i+j].shape[1])
                     batch_token_number += token_number
                     token_numbers.append(token_number)
                 tpf = batch_token_number/nfe/batch_size
@@ -216,7 +229,7 @@ def main(world_size, rank, gpu_id, args):
                     print(f'[iter {i:4d}]nfe={nfe:4d}, token number={batch_token_number:4d}, fps={fps:4.2f},tpf={tpf:2.2f}, tps={tps:4.2f}')
                     if wi==0 and i<5:
                         for j in range(input_ids.shape[0]):
-                            answer = cut_eos(out[j, all_input_ids[i+j].shape[1]:].unsqueeze(0))[0]
+                            answer = cut_eos(out[j, sorted_input_ids[i+j].shape[1]:].unsqueeze(0))[0]
                             # print(answer)
                             print(f'generated text {j}: {tokenizer.decode(answer, skip_special_tokens=False)}')
                 tpfs.append(tpf)
@@ -227,13 +240,34 @@ def main(world_size, rank, gpu_id, args):
             total_token = total_token
 
             stop = time.time()
+
+
+        original_order_outputs = [None] * len(all_input_ids)
+        original_order_tpfs = [None] * len(all_input_ids)
+        original_order_tpss = [None] * len(all_input_ids)
+        original_order_fpss = [None] * len(all_input_ids)
+        original_order_token_numbers = [None] * len(all_input_ids)
+
+        for i, original_idx in enumerate(sorted_indices):
+            original_order_outputs[original_idx] = outputs[i]
+            original_order_tpfs[original_idx] = tpfs[i]
+            original_order_tpss[original_idx] = tpss[i]
+            original_order_fpss[original_idx] = fpss[i]
+            original_order_token_numbers[original_idx] = token_numbers[i]
+
+        outputs = original_order_outputs
+        tpfs = original_order_tpfs
+        tpss = original_order_tpss
+        fpss = original_order_fpss
+        token_numbers = original_order_token_numbers        
+
         if rank==0:
             answers = []
             for i in tqdm.trange(len(outputs)):
                 out = outputs[i]
                 answer = (tokenizer.decode(out[0, all_input_ids[i].shape[1]:], skip_special_tokens=True))
                 answers.append(answer)
-            print(f'Forward: {total_forward}, Time: {stop-start}, FPS: {total_forward/(stop-start)}({np.mean(fpss)}), TPS: {total_token/(stop-start)}({np.mean(tpss)}), TPF: {total_token/total_forward}({np.mean(tpfs)})')
+            print(f'Forward: {total_forward}, Time: {stop-start}, FPS: {total_forward/total_time}({np.mean(fpss)}), TPS: {total_token/total_time}({np.mean(tpss)}), TPF: {total_token/total_forward}({np.mean(tpfs)})')
             filename = args.output_dir+'/'+'_'.join([str(item) for item in [args.exp_name, dataset_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look]])+'.jsonl'
             with open (filename, 'w') as f:
                 for i in range(len(answers)):
@@ -244,7 +278,7 @@ def main(world_size, rank, gpu_id, args):
                     json.dump({'id':id, 'question':question, 'prompt':prompt, 'answer': answer, 'generated_length': token_numbers[i], 'tpf':tpfs[i//batch_size], 'tps':tpss[i//batch_size], 'fps':fpss[i//batch_size], }, f, indent=4)
                     f.write('\n')
             with open('results.txt', 'a+') as f:
-                print(args.exp_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look, total_forward, stop-start, total_token / len(all_input_ids), total_forward/(stop-start), total_token/(stop-start), total_token/total_forward, sum(padded_gen_lens)/total_forward, np.mean(fpss), np.mean(tpss), np.mean(tpfs), args.dataset, file=f)
+                print(args.exp_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look, total_forward, stop-start, total_token / len(all_input_ids), total_forward/total_time, total_token/total_time, total_token/total_forward, sum(padded_gen_lens)/total_forward, np.mean(fpss), np.mean(tpss), np.mean(tpfs), args.dataset, file=f)
 
     
 from multiprocessing import Process
@@ -276,7 +310,9 @@ if __name__ == '__main__':
     parser.add_argument('--model_type', type=str, default='mini')
     parser.add_argument('--config', type=int, default=0)
     args = parser.parse_args()
-
+    port = random.randint(30000, 60000)
+    args.port = str(port)
+    
     if args.config == 1:
         args.cache = ''
         args.parallel_decoding = 'threshold'
