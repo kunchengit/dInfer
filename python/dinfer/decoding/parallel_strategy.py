@@ -494,4 +494,5 @@ class HierarchyDecoder(ParallelDecoder):
         curr_x = x[:, block_start:block_end]
         x0, transfer_index = self.get_transfer_index(logits, mask_index, iter_threshold)
         self.iter += 1
+        transfer_index = torch.logical_and(transfer_index, mask_index)
         x[:, block_start:block_end][transfer_index] = x0[transfer_index]
