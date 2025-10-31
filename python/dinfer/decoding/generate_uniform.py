@@ -95,8 +95,7 @@ class BlockRunner:
         block = x[:, block_loc.start:block_loc.end]
         batch_size = x.batch_size
         while (block == decoder.mask_id).sum() > 0:
-            # TODO(zhengda) we need to consider the batch size.
-            unroll_k = max(min((block == decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 1)
+            unroll_k = int(max(min((block == decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 1))
             for unroll_i in range(unroll_k):
                 self.diff_iteration.forward(model, decoder, x, kv_cache, block, block_loc, block_id)
 
@@ -188,19 +187,22 @@ class BlockDiffusionRunner(BlockRunner):
         else:
             past_key_values, replace_position = None, None
 
+        input_block_mask_number = 0
         while (block == decoder.mask_id).sum() > 0:
-            unroll_k = max(min((block == decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 1)
+            unroll_k = int(max(min((block == decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 2))
             for unroll_i in range(unroll_k):
-                self.diff_iteration.forward(model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position)
+                input_block_mask_number = (block == decoder.mask_id).sum()
+                output = self.diff_iteration.forward(model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position)
         
         # additional forward to update kvcache for the last decoding step in the current block
         if kv_cache is not None:
-            output = model(block, 
-                past_key_values=past_key_values,
-                use_cache=True, 
-                position_ids=pos_ids[:, block_loc.start:block_loc.end],
-                attention_mask=attn_mask[:,block_loc.start: block_loc.end, :block_loc.end],
-                replace_position=replace_position)
+            if input_block_mask_number > 0:
+                output = model(block, 
+                    past_key_values=past_key_values,
+                    use_cache=True, 
+                    position_ids=pos_ids[:, block_loc.start:block_loc.end],
+                    attention_mask=attn_mask[:,block_loc.start: block_loc.end, :block_loc.end],
+                    replace_position=replace_position)
             kv_cache.update(output.past_key_values)
 
         if self.early_stop and torch.any(x[block_loc.start:block_loc.end] == decoder.eos_id):
@@ -322,9 +324,10 @@ class BlockDiffusionIteration:
             The tensor indicates the valid locations in the returned key-values.
         """
         if kv_cache is None:
-            logits = model(x.data[:, :block_loc.end], 
+            output = model(x.data[:, :block_loc.end], 
                 attention_mask=attn_mask[:,:block_loc.end,:block_loc.end], 
-                position_ids=pos_ids[:, :block_loc.end]).logits[:, block_loc.start:block_loc.end]
+                position_ids=pos_ids[:, :block_loc.end])
+            logits = output.logits[:, block_loc.start:block_loc.end]
         else:
             output = model(block,
                 position_ids=pos_ids[:,block_loc.start:block_loc.end],
@@ -339,6 +342,7 @@ class BlockDiffusionIteration:
         decoder.decode(logits, block_loc.start, block_loc.end, x)
         self.num_forwards += 1
         self.iter_no += 1
+        return output
 
 
 class ShiftDiffusionIteration(DiffusionIteration):
