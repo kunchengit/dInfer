@@ -214,7 +214,6 @@ class BlockDiffusionRunner(BlockRunner):
                     past_key_values=past_key_values,
                     use_cache=True, 
                     position_ids=pos_ids[:, block_loc.start:block_loc.end],
-                    # attention_mask=attn_mask[:,block_loc.start: block_loc.end, :block_loc.end],
                     replace_position=replace_position)
             kv_cache.update(output.past_key_values)
             self.diff_iteration.num_forwards +=1
@@ -345,7 +344,6 @@ class BlockDiffusionIteration:
         else:
             output = model(block,
                 position_ids=pos_ids[:,block_loc.start:block_loc.end],
-                # attention_mask=attn_mask[:,block_loc.start: block_loc.end,:block_loc.end],
                 use_cache=True,
                 past_key_values=past_key_values,
                 replace_position=replace_position)
