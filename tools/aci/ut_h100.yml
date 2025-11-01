@@ -40,8 +40,8 @@ command:
   - git -C dInfer fetch --depth 1 origin ${{commit_id}}
   - git -C dInfer checkout -q FETCH_HEAD
   - cd dInfer
-  - perl -pi -e 's/^(model_path|moe_model_path)/# $1/' tests/test.py
-  - perl -pi -e 's/^#(model_path|moe_model_path)/$1/' tests/test.py
+  #- perl -pi -e 's/^(model_path|moe_model_path)/# $1/' tests/test.py
+  #- perl -pi -e 's/^#(model_path|moe_model_path)/$1/' tests/test.py
   - pip install -e .
   - pip install numpy==1.26.4 flash_attn==2.8.3
   - PYTHONPATH=tests python3 -m pytest tests/test.py
