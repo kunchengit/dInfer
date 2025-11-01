@@ -153,6 +153,8 @@ class BlockDiffusionRunner(BlockRunner):
         else:
             output = model(block, use_cache=True, attention_mask=attn_mask, position_ids=pos_ids)
             kv_cache.update(output.past_key_values)
+            self.diff_iteration.num_forwards +=1
+            self.diff_iteration.iter_no +=1
 
     def decode(self, model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask):
         """ Decode all tokens in a block.
