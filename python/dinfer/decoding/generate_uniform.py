@@ -153,6 +153,8 @@ class BlockDiffusionRunner(BlockRunner):
         else:
             output = model(block, use_cache=True, attention_mask=attn_mask, position_ids=pos_ids)
             kv_cache.update(output.past_key_values)
+            self.diff_iteration.num_forwards +=1
+            self.diff_iteration.iter_no +=1
 
     def decode(self, model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask):
         """ Decode all tokens in a block.
@@ -212,9 +214,12 @@ class BlockDiffusionRunner(BlockRunner):
                     past_key_values=past_key_values,
                     use_cache=True, 
                     position_ids=pos_ids[:, block_loc.start:block_loc.end],
-                    attention_mask=attn_mask[:,block_loc.start: block_loc.end, :block_loc.end],
                     replace_position=replace_position)
             kv_cache.update(output.past_key_values)
+            self.diff_iteration.num_forwards +=1
+            self.diff_iteration.iter_no +=1
+
+
 
         eos_idx = torch.any(orig_x[:, block_loc.start:block_loc.end] == decoder.eos_id, dim=1)
         if self.early_stop:
@@ -339,7 +344,6 @@ class BlockDiffusionIteration:
         else:
             output = model(block,
                 position_ids=pos_ids[:,block_loc.start:block_loc.end],
-                attention_mask=attn_mask[:,block_loc.start: block_loc.end,:block_loc.end],
                 use_cache=True,
                 past_key_values=past_key_values,
                 replace_position=replace_position)
@@ -911,7 +915,10 @@ class BlockDiffusionLLM(DiffusionLLM):
         kv_cache = self.cache_factory.create()
 
         # prefill for kv_cache
-        self.block_runner.prefill(self.model, x[:, :prompt_length], kv_cache, pos_ids[:, :prompt_length], bd_attn_mask[:,:prompt_length,:prompt_length])
+        prefill_blocks = prompt_length // block_length
+        prefill_length = prefill_blocks * block_length
+        prefill_length = max(prefill_length, block_length)
+        self.block_runner.prefill(self.model, x[:, :prefill_length], kv_cache, pos_ids[:, :prefill_length], bd_attn_mask[:,:prefill_length,:prefill_length])
         
         # We need to reset iter_no at the beginning of generating a sequence.
         self.diff_iteration.iter_no = 0
@@ -922,3 +929,4 @@ class BlockDiffusionLLM(DiffusionLLM):
                 break
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
         return x.get_generated_tokens()
+

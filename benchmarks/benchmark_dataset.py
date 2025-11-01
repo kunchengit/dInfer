@@ -163,7 +163,7 @@ def main(world_size, rank, gpu_id, args):
                 else:
                     dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True, use_shift=args.use_shift)
         else:
-            dllm = BlockDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True)
+            dllm = BlockDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True, use_block_diffusion=True), cache_factory=cache_factory, early_stop=True)
         batch_size = args.batch_size
         warmup_cudagraph(rank, device, dllm, args)
 
@@ -388,6 +388,17 @@ if __name__ == '__main__':
         args.threshold = 0.95
         args.warmup_times = 0
         args.use_bd=True
+
+    elif args.config == 41:
+        args.cache = 'prefix'
+        args.parallel_decoding = 'threshold'
+        args.prefix_look = 0
+        args.after_look = 0
+        args.threshold = 0.95
+        args.warmup_times = 0
+        args.use_bd=True
+        args.block_length=32
+        
 
     procs = []
     print(args)
