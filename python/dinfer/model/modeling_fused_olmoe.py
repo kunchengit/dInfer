@@ -790,8 +790,7 @@ class OlmoeDecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         shared_expert_states = hidden_states
 
-        # TODO(zhengda) disable MOE layer first.
-        #hidden_states = self.mlp(hidden_states.clone())
+        hidden_states = self.mlp(hidden_states.clone())
 
         if hasattr(self, "shared_expert"):
             hidden_states = hidden_states + self.shared_expert(shared_expert_states)
