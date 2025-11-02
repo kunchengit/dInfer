@@ -496,13 +496,16 @@ class IterationSmooth(DiffusionIteration):
         self.inputs_embeds = None
         self.iter_no = 0
 
+    def reset_input_embeds(self, x):
+        """ Reset input embedding with new input sequence
+        """
+        self.inputs_embeds = self.h2e(x.data)
+
     def forward(self, model, decoder, x, kv_cache, block, block_loc, block_id):
         """ The forward computation to decode tokens.
         """
         iter_cont_weight = min(self.cont_weight_init+self.cont_weight_growth*self.iter_no, self.cont_weight)
         iter_threshold = max(1-self.iter_no*self.threshold_decay, decoder.threshold)
-        if self.inputs_embeds is None:
-            self.inputs_embeds = self.h2e(x.data)
         # Update KV-cache
         if kv_cache is not None and kv_cache.require_update(self.iter_no, block_loc.start, block_loc.end):
             output = model(inputs_embeds=self.inputs_embeds, use_cache=True)
@@ -569,6 +572,26 @@ class IterSmoothDiffusionLLM(BlockWiseDiffusionLLM):
     @property
     def cache_updates(self):
         return self.diff_iteration.cache_updates
+    
+    @ torch.no_grad()
+    def generate(self, prompt, gen_length=128, block_length=128):
+        ''' Generate tokens with diffusion iterations block by block.
+        '''
+        x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
+        it = self.iterator_factory.create(x, block_length)
+
+        # We need to reset iter_no at the beginning of generating a sequence.
+        self.diff_iteration.iter_no = 0
+        self.diff_iteration.reset_input_embeds(x)
+        kv_cache = self.cache_factory.create() if self.cache_factory is not None else None
+        for block_id, (block_loc, block) in enumerate(it):
+            self.decoder.block_init(block, block_id)
+            decode_compl = self.block_decoder.decode(self.model, self.decoder, x, kv_cache, block, block_loc, block_id)
+            # If all sequences have EOS, we have finished decoding.
+            if torch.all(decode_compl):
+                break
+        logger.info(f'The number of diffusion iterations: {self.num_forwards}')
+        return x.get_generated_tokens()
 
 class VicinityCacheIteration(DiffusionIteration):
     """ A diffusion iteration to decode tokens
@@ -656,6 +679,11 @@ class IterSmoothWithVicinityCache(DiffusionIteration):
         self.threshold_decay = threshold_decay
         self.inputs_embeds = None
         self.iter_no = 0
+    
+    def reset_input_embeds(self, x):
+        """ Reset input embedding with new input sequence
+        """
+        self.inputs_embeds = self.h2e(x.data)
 
     def forward(self, model, decoder, x, kv_cache, block, block_loc, block_id):
         """ The forward computation to decode tokens.
@@ -667,8 +695,6 @@ class IterSmoothWithVicinityCache(DiffusionIteration):
 
         iter_cont_weight = min(self.cont_weight_init+self.cont_weight_growth*self.iter_no, self.cont_weight)
         iter_threshold = max(1-self.iter_no*self.threshold_decay, decoder.threshold)
-        if self.inputs_embeds is None:
-            self.inputs_embeds = self.h2e(x.data)
         if self.iter_no < self.warmup_steps:
             out_full = model(inputs_embeds=self.inputs_embeds)
             self.num_forwards += 1
@@ -706,7 +732,7 @@ class IterSmoothWithVicinityCache(DiffusionIteration):
         mask_index = (x.data[:, left_start:right_end] == decoder.mask_id)
         self.inputs_embeds[:, left_start:right_end] = self.h2e(x.data[:, left_start:right_end], mask_index, out_step.logits, iter_cont_weight)
 
-class IterSmoothWithVicinityCacheDiffusionLLM(BlockWiseDiffusionLLM):
+class IterSmoothWithVicinityCacheDiffusionLLM(IterSmoothDiffusionLLM):
     """ This diffusion LLM inference generates tokens with vicinity cache and iteration smoothing.
     """
     def __init__(self, model, decoder, iterator_factory, cache_factory, maximum_unroll=4, expected_tpf=8,
