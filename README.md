@@ -140,7 +140,7 @@ Use the conversion tool to fuse MoE experts.
 
 ```bash
 # From repo root
-python tools/transfer.py \
+python -m tools.transfer.py \
   --input  /path/to/LLaDA-MoE-7B-A1B-Instruct \
   --output /path/to/LLaDA-MoE-7B-A1B-Instruct-fused
 ```
