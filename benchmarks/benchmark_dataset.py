@@ -117,14 +117,17 @@ def main(world_size, rank, gpu_id, args):
         print("EP Enabled:", vllm_config.parallel_config.enable_expert_parallel)
 
         model_config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=True)
-        if args.model_type=='moe':
+        if args.model_type=='llada_moe':
             model = FusedOlmoeForCausalLM(config=model_config).eval()
             model.load_weights(args.model_name, torch_dtype=torch.bfloat16)
-        elif args.model_type=='mini':
+        elif args.model_type=='llada2':
             model = LLaDA2MoeModelLM(config=model_config).eval()
             model.load_weights(args.model_name, torch_dtype=torch.bfloat16, device=device)
-        else:
+        elif args.model_type=='llada':
             model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device=device).eval()
+        else:
+            raise ValueError('model type not supported')
+        
         if args.tp_size>1 and args.use_tp:
             print('enabling tp')
             model.tensor_parallel(args.tp_size)
@@ -246,15 +249,31 @@ def main(world_size, rank, gpu_id, args):
             with open('results.txt', 'a+') as f:
                 print(args.exp_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look, total_forward, stop-start, total_token / len(all_input_ids), total_forward/(stop-start), total_token/(stop-start), total_token/total_forward, sum(padded_gen_lens)/total_forward, np.mean(fpss), np.mean(tpss), np.mean(tpfs), args.dataset, file=f)
 
+def process_args(args):
+    import warnings
+    gpus = [int(gpu) for gpu in args.gpu.split(',')]
+    if len(gpus) > 1 and not args.use_tp:
+        warnings.warn('Using multiple GPUs without tensor parallelism is not recommended. TP will be enabled.')
+    elif len(gpus) == 1 and args.use_tp:
+        warnings.warn('Using tensor parallelism with only one GPU is not accepted. TP will be disabled.')
     
+    if args.model_type == 'llada2' and not args.use_bd:
+        warnings.warn('Using llada2 without block diffusion is not recommended.')
+
+    args.tp_size = len(gpus)
+    args.use_tp = args.tp_size > 1
+    args.port_offset = gpus[0]
+
+    return args
+
 from multiprocessing import Process
 import argparse
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', type=str, default='')
-    parser.add_argument('--dataset', type=str, default='')
+    parser.add_argument('--model_name', type=str, required=True)
+    parser.add_argument('--dataset', type=str, required=True)
     parser.add_argument('--gpu', type=str, default='0,1,2,3')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--gen_len', type=int, default=1024)
@@ -265,7 +284,7 @@ if __name__ == '__main__':
     parser.add_argument('--warmup_times', type=int, default=0)
     parser.add_argument('--low_threshold', type=float, default=0.3)
     parser.add_argument('--cont_weight', type=float, default=0)
-    parser.add_argument('--parallel_decoding', type=str, default='hierarchy_faster')
+    parser.add_argument('--parallel_decoding', type=str, default='threshold')
     parser.add_argument('--use_credit', action='store_true')
     parser.add_argument('--exp_name', type=str, default='exp')
     parser.add_argument('--cache', type=str, default='')
@@ -273,7 +292,8 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', type=str, default='/ossfs/workspace/detailed_results_0917')
     parser.add_argument('--use_shift', action='store_true')
     parser.add_argument('--use_bd', action='store_true')
-    parser.add_argument('--model_type', type=str, default='mini')
+    parser.add_argument('--model_type', type=str, default='llada2',
+        help="llada2 (for llada2-mini or llada2-flash) | llada_moe (for llada-moe) | llada (for llada or llada-1.5)")
     parser.add_argument('--config', type=int, default=0)
     args = parser.parse_args()
 
@@ -400,14 +420,11 @@ if __name__ == '__main__':
         args.block_length=32
         
 
-    procs = []
-    print(args)
+    print(f"The input args are listed as follows: {args}")
 
+    args = process_args(args)
     gpus = [int(gpu) for gpu in args.gpu.split(',')]
-    args.tp_size = len(gpus)
-    args.use_tp = args.tp_size > 1
-    args.port_offset = gpus[0]
-    
+    procs = []
     if len(gpus) == 1:
         main(1, 0, gpus[0], args)
     else:
