@@ -23,7 +23,6 @@ bucket_size = 32
 used_buckets = []
 
 def get_bucket_length(length):
-    #bucket_length = bucket_size*((length+bucket_size-1)//bucket_size)
     bucket_length = bucket_size*(length//bucket_size)
     if bucket_length not in used_buckets:
         used_buckets.append(bucket_length)
@@ -102,7 +101,7 @@ def main(world_size, rank, gpu_id, args):
 
     from vllm import distributed
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = str(45601+args.port_offset)
+    os.environ['MASTER_PORT'] = args.port
     distributed.init_distributed_environment(world_size, rank, 'env://', rank, 'nccl')
     distributed.initialize_model_parallel(args.tp_size, backend='nccl')
     print("[Loading model]")
@@ -113,14 +112,16 @@ def main(world_size, rank, gpu_id, args):
         print("EP Enabled:", vllm_config.parallel_config.enable_expert_parallel)
 
         model_config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=True)
-        if args.model_type=='moe':
+        if args.model_type=='llada_moe':
             model = FusedOlmoeForCausalLM(config=model_config).eval()
             model.load_weights(args.model_name, torch_dtype=torch.bfloat16)
-        elif args.model_type=='mini':
+        elif args.model_type=='llada2':
             model = LLaDA2MoeModelLM(config=model_config).eval()
             model.load_weights(args.model_name, torch_dtype=torch.bfloat16, device=device)
-        else:
+        elif args.model_type=='llada':
             model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device=device).eval()
+        else:
+            raise ValueError('model type not supported')
         if args.tp_size>1 and args.use_tp:
             print('enabling tp')
             model.tensor_parallel(args.tp_size)
@@ -138,6 +139,7 @@ def main(world_size, rank, gpu_id, args):
 
         else:
             decoder = HierarchyDecoder(temperature=0, threshold=args.threshold, low_threshold=args.low_threshold, mask_id=156895, eos_id=156892)
+        warmup_decoder = ThresholdParallelDecoder(temperature=0, threshold=0.5, mask_id=156895, eos_id=156892)
         use_sw = args.prefix_look > 0 or args.after_look > 0 or args.warmup_times > 0
             
         if args.cache == 'prefix' or args.cache == 'dual':
@@ -150,16 +152,24 @@ def main(world_size, rank, gpu_id, args):
                 if use_sw:
                     dllm = IterSmoothWithVicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True,
                         cont_weight=args.cont_weight, prefix_look=args.prefix_look, after_look=args.after_look, warmup_steps=args.warmup_times)
+                    warmup_dllm = IterSmoothWithVicinityCacheDiffusionLLM(model, warmup_decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=False,
+                        cont_weight=args.cont_weight, prefix_look=args.prefix_look, after_look=args.after_look, warmup_steps=args.warmup_times)
                 else:
                     dllm = IterSmoothDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True, cont_weight=args.cont_weight)
+                    warmup_dllm = IterSmoothDiffusionLLM(model, warmup_decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=False, cont_weight=args.cont_weight)
             else:
                 if use_sw:
                     dllm = VicinityCacheDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True,
                         prefix_look=args.prefix_look, after_look=args.after_look, warmup_steps=args.warmup_times)
+                    warmup_dllm = VicinityCacheDiffusionLLM(model, warmup_decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=False,
+                        prefix_look=args.prefix_look, after_look=args.after_look, warmup_steps=args.warmup_times)
                 else:
                     dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True, use_shift=args.use_shift)
+                    warmup_dllm = BlockWiseDiffusionLLM(model, warmup_decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=False, use_shift=args.use_shift)
         else:
-            dllm = BlockDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True)
+            dllm = BlockDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True, use_block_diffusion=True), cache_factory=cache_factory, early_stop=True, maximum_unroll=4, expected_tpf=4)
+            warmup_dllm = BlockDiffusionLLM(model, warmup_decoder, BlockIteratorFactory(start_block_align=True, use_block_diffusion=True), cache_factory=cache_factory, early_stop=False, maximum_unroll=4, expected_tpf=4)
+
         batch_size = args.batch_size
 
 
@@ -168,7 +178,6 @@ def main(world_size, rank, gpu_id, args):
 
         sorted_input_ids = [all_input_ids[i] for i in sorted_indices]
         sorted_padded_gen_lens = [padded_gen_lens[i] for i in sorted_indices]
-        out = dllm.generate(sorted_input_ids[0], gen_length=sorted_input_ids[-1].shape[1]+sorted_padded_gen_lens[0], block_length=block_length)
 
         for wi in range(1):
             outputs = []
@@ -192,7 +201,7 @@ def main(world_size, rank, gpu_id, args):
                 prefill_length = prefill_blocks * block_length
 
                 max_length = input_ids[-1].shape[1]
-                min_padded_length = padded_gen_lens[i+batch_size-1]
+                min_padded_length = sorted_padded_gen_lens[i+len(input_ids)-1]
                 batch_input_ids= torch.zeros((len(input_ids), max_length), dtype=torch.long, device=device).fill_(156895)
                 for j in range(len(input_ids)):
                     batch_input_ids[j, :input_ids[j].shape[1]] = input_ids[j].to(device)
@@ -200,9 +209,8 @@ def main(world_size, rank, gpu_id, args):
                 if prefill_length != last_prefill_length:
                     if rank==0:
                         print(f'warmup {i}, prefill length: {prefill_length}, sample length: {sorted_input_ids[i].shape[1]}')
-                    out = dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
-                    out = dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
-                    # out = warmup_dllm.generate(sorted_input_ids[i], gen_length=sorted_padded_gen_lens[i], block_length=block_length)
+                    out = warmup_dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
+                    out = warmup_dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
                     last_prefill_length = prefill_length
                     if rank==0:
                         print(f'warmup finished')
@@ -225,16 +233,15 @@ def main(world_size, rank, gpu_id, args):
                 tpf = batch_token_number/nfe/batch_size
                 tps = batch_token_number/sample_time
                 fps = nfe/sample_time
-                if rank == 0:
-                    print(f'[iter {i:4d}]nfe={nfe:4d}, token number={batch_token_number:4d}, fps={fps:4.2f},tpf={tpf:2.2f}, tps={tps:4.2f}')
-                    if wi==0 and i<5:
-                        for j in range(input_ids.shape[0]):
-                            answer = cut_eos(out[j, sorted_input_ids[i+j].shape[1]:].unsqueeze(0))[0]
-                            # print(answer)
-                            print(f'generated text {j}: {tokenizer.decode(answer, skip_special_tokens=False)}')
                 tpfs.append(tpf)
                 tpss.append(tps)
                 fpss.append(fps)
+                if rank == 0:
+                    print(f'[iter {i:4d}]nfe={nfe:4d}, token number={batch_token_number:4d}, sample_time={sample_time:2.4f}, fps={fps:4.2f}({np.mean(fpss):4.2f}),tpf={tpf:2.2f}({np.mean(tpfs):4.2f}), tps={tps:4.2f}({np.mean(tpss):4.2f})')
+                    if wi==0 and i<5:
+                        for j in range(min(input_ids.shape[0], 4)):
+                            answer = cut_eos(out[j, sorted_input_ids[i+j].shape[1]:].unsqueeze(0))[0]
+                            print(f'generated text {j}: {tokenizer.decode(answer, skip_special_tokens=False)}')
                 total_token += token_number
 
             total_token = total_token
@@ -249,11 +256,11 @@ def main(world_size, rank, gpu_id, args):
         original_order_token_numbers = [None] * len(all_input_ids)
 
         for i, original_idx in enumerate(sorted_indices):
-            original_order_outputs[original_idx] = outputs[i]
-            original_order_tpfs[original_idx] = tpfs[i]
-            original_order_tpss[original_idx] = tpss[i]
-            original_order_fpss[original_idx] = fpss[i]
-            original_order_token_numbers[original_idx] = token_numbers[i]
+            original_order_outputs[original_idx] = outputs[i//batch_size]
+            original_order_tpfs[original_idx] = tpfs[i//batch_size]
+            original_order_tpss[original_idx] = tpss[i//batch_size]
+            original_order_fpss[original_idx] = fpss[i//batch_size]
+            original_order_token_numbers[original_idx] = token_numbers[i//batch_size]
 
         outputs = original_order_outputs
         tpfs = original_order_tpfs
@@ -278,17 +285,33 @@ def main(world_size, rank, gpu_id, args):
                     json.dump({'id':id, 'question':question, 'prompt':prompt, 'answer': answer, 'generated_length': token_numbers[i], 'tpf':tpfs[i//batch_size], 'tps':tpss[i//batch_size], 'fps':fpss[i//batch_size], }, f, indent=4)
                     f.write('\n')
             with open('results.txt', 'a+') as f:
-                print(args.exp_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look, total_forward, stop-start, total_token / len(all_input_ids), total_forward/total_time, total_token/total_time, total_token/total_forward, sum(padded_gen_lens)/total_forward, np.mean(fpss), np.mean(tpss), np.mean(tpfs), args.dataset, file=f)
+                print(args.exp_name, args.config, args.parallel_decoding, args.threshold, args.prefix_look, args.batch_size, args.block_length, args.gpu, total_forward, stop-start, total_time, total_token / len(all_input_ids), total_forward/total_time, total_token/total_time, total_token/total_forward, sum(padded_gen_lens)/total_forward, np.mean(fpss), np.mean(tpss), np.mean(tpfs), args.dataset, file=f)
 
+def process_args(args):
+    import warnings
+    gpus = [int(gpu) for gpu in args.gpu.split(',')]
+    if len(gpus) > 1 and not args.use_tp:
+        warnings.warn('Using multiple GPUs without tensor parallelism is not recommended. TP will be enabled.')
+    elif len(gpus) == 1 and args.use_tp:
+        warnings.warn('Using tensor parallelism with only one GPU is not accepted. TP will be disabled.')
     
+    if args.model_type == 'llada2' and not args.use_bd:
+        warnings.warn('Using llada2 without block diffusion is not recommended.')
+
+    args.tp_size = len(gpus)
+    args.use_tp = args.tp_size > 1
+    args.port_offset = gpus[0]
+
+    return args
+
 from multiprocessing import Process
 import argparse
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name', type=str, default='')
-    parser.add_argument('--dataset', type=str, default='')
+    parser.add_argument('--model_name', type=str, required=True)
+    parser.add_argument('--dataset', type=str, required=True)
     parser.add_argument('--gpu', type=str, default='0,1,2,3')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--gen_len', type=int, default=1024)
@@ -299,15 +322,15 @@ if __name__ == '__main__':
     parser.add_argument('--warmup_times', type=int, default=0)
     parser.add_argument('--low_threshold', type=float, default=0.3)
     parser.add_argument('--cont_weight', type=float, default=0)
-    parser.add_argument('--parallel_decoding', type=str, default='hierarchy_faster')
+    parser.add_argument('--parallel_decoding', type=str, default='threshold')
     parser.add_argument('--use_credit', action='store_true')
     parser.add_argument('--exp_name', type=str, default='exp')
     parser.add_argument('--cache', type=str, default='')
     parser.add_argument('--use_tp', action='store_true')
-    parser.add_argument('--output_dir', type=str, default='/ossfs/workspace/detailed_results_0917')
+    parser.add_argument('--output_dir', type=str, default='/ossfs/workspace/detailed_results')
     parser.add_argument('--use_shift', action='store_true')
     parser.add_argument('--use_bd', action='store_true')
-    parser.add_argument('--model_type', type=str, default='mini')
+    parser.add_argument('--model_type', type=str, default='llada2')
     parser.add_argument('--config', type=int, default=0)
     args = parser.parse_args()
     port = random.randint(30000, 60000)
@@ -320,102 +343,6 @@ if __name__ == '__main__':
         args.after_look = 0
         args.threshold = 0.95
         args.warmup_times = 0
-    elif args.config == 2:
-        args.cache = 'dual'
-        args.parallel_decoding = 'threshold'
-        args.prefix_look = 0
-        args.after_look = 0
-        args.threshold = 0.95
-        args.warmup_times = 0
-    elif args.config == 3:
-        args.cache = 'dual'
-        args.parallel_decoding = 'threshold'
-        args.prefix_look = 16
-        args.after_look = 16
-        args.threshold = 0.95
-        args.warmup_times = 4
-    elif args.config == 4:
-        args.cache = ''
-        args.parallel_decoding = 'threshold'
-        args.prefix_look = 0
-        args.after_look = 0
-        args.threshold = 0.8
-        args.warmup_times = 0
-    elif args.config == 5:
-        args.cache = ''
-        args.parallel_decoding = 'hierarchy_faster'
-        args.prefix_look = 0
-        args.after_look = 0
-        args.threshold = 0.8
-        args.low_threshold = 0.5
-        args.warmup_times = 0
-    elif args.config == 6:
-        args.cache = 'dual'
-        args.parallel_decoding = 'hierarchy_faster'
-        args.prefix_look = 16
-        args.after_look = 16
-        args.threshold = 0.8
-        args.low_threshold = 0.5
-        args.warmup_times = 4
-    elif args.config == 9:
-        args.cache = 'dual'
-        args.parallel_decoding = 'threshold'
-        args.prefix_look = 16
-        args.after_look = 16
-        args.threshold = 0.9
-        args.low_threshold = 0.7
-        args.warmup_times = 4
-
-    elif args.config == 10:
-        args.cache = 'dual'
-        args.parallel_decoding = 'threshold'
-        args.prefix_look = 16
-        args.after_look = 16
-        args.threshold = 0.85
-        args.warmup_times = 4
-    elif args.config == 11:
-        args.cache = 'dual'
-        args.parallel_decoding = 'threshold'
-        args.prefix_look = 16
-        args.after_look = 16
-        args.threshold = 0.8
-        args.low_threshold = 0.75
-        args.warmup_times = 4
-
-    elif args.config == 12:
-        args.cache = 'dual'
-        args.parallel_decoding = 'threshold'
-        args.prefix_look = 16
-        args.after_look = 16
-        args.threshold = 0.85
-        args.low_threshold = 0.5
-        args.warmup_times = 4
-        
-    elif args.config == 13:
-        args.cache = 'dual'
-        args.parallel_decoding = 'threshold'
-        args.prefix_look = 16
-        args.after_look = 16
-        args.threshold = 0.8
-        args.warmup_times = 4
-
-    elif args.config == 14:
-        args.cache = 'dual'
-        args.parallel_decoding = 'hierarchy_faster'
-        args.prefix_look = 16
-        args.after_look = 16
-        args.threshold = 0.9
-        args.low_threshold = 0.7
-        args.warmup_times = 4
-
-    elif args.config == 15:
-        args.cache = 'dual'
-        args.parallel_decoding = 'hierarchy_faster'
-        args.prefix_look = 16
-        args.after_look = 16
-        args.threshold = 0.85
-        args.low_threshold = 0.75
-        args.warmup_times = 4
     elif args.config == 40:
         args.cache = 'prefix'
         args.parallel_decoding = 'threshold'
@@ -425,14 +352,11 @@ if __name__ == '__main__':
         args.warmup_times = 0
         args.use_bd=True
 
-    procs = []
-    print(args)
+    print(f"The input args are listed as follows: {args}")
 
+    args = process_args(args)
     gpus = [int(gpu) for gpu in args.gpu.split(',')]
-    args.tp_size = len(gpus)
-    args.use_tp = args.tp_size > 1
-    args.port_offset = gpus[0]
-    
+    procs = []
     if len(gpus) == 1:
         main(1, 0, gpus[0], args)
     else:
