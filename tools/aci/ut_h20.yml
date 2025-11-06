@@ -33,16 +33,12 @@ enable_wait: false
 # 远端执行的命令
 command:
   - mkdir -p /mnt/dllm
-  - mkdir -p /mnt/infra
   - mountpoint -q /mnt/dllm || mount -t nfs -o vers=3,nolock,proto=tcp,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 2645564b993-kvk4.cn-heyuan-alipay.nas.aliyuncs.com:/ /mnt/dllm/
-  - mountpoint -q /mnt/infra || mount -t nfs -o vers=3,nolock,proto=tcp,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 261c114a3a0-cah75.cn-heyuan-alipay.nas.aliyuncs.com:/ /mnt/infra
   - git clone git@code.alipay.com:LLMInfra/dInfer.git
   - git -C dInfer fetch --depth 1 origin ${{commit_id}}
   - git -C dInfer checkout -q FETCH_HEAD
   - cd dInfer
-  #- perl -pi -e 's/^(model_path|moe_model_path)/# $1/' tests/test.py
-  #- perl -pi -e 's/^#(model_path|moe_model_path)/$1/' tests/test.py
   - pip install -e .
   - pip install numpy==1.26.4 flash_attn==2.8.3
-  - PYTHONPATH=tests python3 -m pytest tests/test.py
-  - PYTHONPATH=tests python3 -m pytest tests/test_bd.py
+  - pip install pytest-xdist 
+  - pytest -n 4 --dist=loadfile tests/test_llada.py tests/test_wo_model.py tests/test_llada_moe.py tests/test_bd.py
