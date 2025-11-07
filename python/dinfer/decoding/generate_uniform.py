@@ -835,12 +835,12 @@ class BlockDiffusionLLMAttnmask(DiffusionLLM):
         The factory class that generates the iterator on the input token array.
 
     """
-    def __init__(self, model, decoder, iterator_factory, early_stop=True, maximum_unroll=4, expected_tpf=8):
+    def __init__(self, model, decoder, iterator_factory, early_stop=True, maximum_unroll=4, expected_tpf=8, backend='vllm'):
         self.model = model
         self.decoder = decoder
         self.iterator_factory = iterator_factory
         self.diff_iteration = BlockDiffusionIteration()
-        self.block_runner = BlockDiffusionRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        self.block_runner = BlockDiffusionRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf, backend)
         
 
     @property
