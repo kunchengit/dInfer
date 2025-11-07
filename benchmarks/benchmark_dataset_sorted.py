@@ -77,7 +77,7 @@ def warmup_cudagraph(rank, device, dllm, args):
         input_ids = torch.randint(0, 140000, (batch_size, i - args.gen_len+offset), dtype=torch.long, device=device)
         dllm.generate(input_ids, gen_length=args.gen_len, block_length=args.block_length)
 
-def cut_eos(data, eos_id=156892):
+def cut_eos(data, eos_id):
     eos_indices = (data[0] == eos_id).nonzero(as_tuple=True)[0]
     if eos_indices.numel() > 0:
         first_eos_idx = eos_indices[0].item()
@@ -115,11 +115,17 @@ def main(world_size, rank, gpu_id, args):
         if args.model_type=='llada_moe':
             model = FusedOlmoeForCausalLM(config=model_config).eval()
             model.load_weights(args.model_name, torch_dtype=torch.bfloat16)
+            mask_id = 156895
+            eos_id = 156892
         elif args.model_type=='llada2':
             model = LLaDA2MoeModelLM(config=model_config).eval()
             model.load_weights(args.model_name, torch_dtype=torch.bfloat16, device=device)
+            mask_id = 156895
+            eos_id = 156892
         elif args.model_type=='llada':
-            model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device=device).eval()
+            model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device=str(device)).eval()
+            mask_id = 126336
+            eos_id = 126081
         else:
             raise ValueError('model type not supported')
         if args.tp_size>1 and args.use_tp:
@@ -133,13 +139,13 @@ def main(world_size, rank, gpu_id, args):
 
         if args.parallel_decoding == 'threshold':
             if args.use_credit:
-                decoder = CreditThresholdParallelDecoder(temperature=0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+                decoder = CreditThresholdParallelDecoder(temperature=0, threshold=args.threshold, mask_id=mask_id, eos_id=eos_id)
             else:
-                decoder = ThresholdParallelDecoder(temperature=0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+                decoder = ThresholdParallelDecoder(temperature=0, threshold=args.threshold, mask_id=mask_id, eos_id=eos_id)
 
         else:
-            decoder = HierarchyDecoder(temperature=0, threshold=args.threshold, low_threshold=args.low_threshold, mask_id=156895, eos_id=156892)
-        warmup_decoder = ThresholdParallelDecoder(temperature=0, threshold=0.5, mask_id=156895, eos_id=156892)
+            decoder = HierarchyDecoder(temperature=0, threshold=args.threshold, low_threshold=args.low_threshold, mask_id=mask_id, eos_id=eos_id)
+        warmup_decoder = ThresholdParallelDecoder(temperature=0, threshold=0.5, mask_id=mask_id, eos_id=eos_id)
         use_sw = args.prefix_look > 0 or args.after_look > 0 or args.warmup_times > 0
             
         if args.cache == 'prefix' or args.cache == 'dual':
@@ -202,7 +208,7 @@ def main(world_size, rank, gpu_id, args):
 
                 max_length = input_ids[-1].shape[1]
                 min_padded_length = sorted_padded_gen_lens[i+len(input_ids)-1]
-                batch_input_ids= torch.zeros((len(input_ids), max_length), dtype=torch.long, device=device).fill_(156895)
+                batch_input_ids= torch.zeros((len(input_ids), max_length), dtype=torch.long, device=device).fill_(mask_id)
                 for j in range(len(input_ids)):
                     batch_input_ids[j, :input_ids[j].shape[1]] = input_ids[j].to(device)
                 input_ids = batch_input_ids
@@ -227,7 +233,7 @@ def main(world_size, rank, gpu_id, args):
                 total_time += sample_time
                 batch_token_number = 0
                 for j in range(input_ids.shape[0]):
-                    token_number = int((out[j]!=156892).sum() - sorted_input_ids[i+j].shape[1])
+                    token_number = int((out[j]!=eos_id).sum() - sorted_input_ids[i+j].shape[1])
                     batch_token_number += token_number
                     token_numbers.append(token_number)
                 tpf = batch_token_number/nfe/batch_size
@@ -240,7 +246,7 @@ def main(world_size, rank, gpu_id, args):
                     print(f'[iter {i:4d}]nfe={nfe:4d}, token number={batch_token_number:4d}, sample_time={sample_time:2.4f}, fps={fps:4.2f}({np.mean(fpss):4.2f}),tpf={tpf:2.2f}({np.mean(tpfs):4.2f}), tps={tps:4.2f}({np.mean(tpss):4.2f})')
                     if wi==0 and i<5:
                         for j in range(min(input_ids.shape[0], 4)):
-                            answer = cut_eos(out[j, sorted_input_ids[i+j].shape[1]:].unsqueeze(0))[0]
+                            answer = cut_eos(out[j, sorted_input_ids[i+j].shape[1]:].unsqueeze(0), eos_id=eos_id)[0]
                             print(f'generated text {j}: {tokenizer.decode(answer, skip_special_tokens=False)}')
                 total_token += token_number
 

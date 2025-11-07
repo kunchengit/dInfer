@@ -76,11 +76,17 @@ def main(world_size, rank, gpu_id, args):
         if args.model_type=='llada_moe':
             model = FusedOlmoeForCausalLM(config=model_config).eval()
             model.load_weights(args.model_name, torch_dtype=torch.bfloat16)
+            mask_id = 156895
+            eos_id = 156892
         elif args.model_type=='llada2':
             model = LLaDA2MoeModelLM(config=model_config).eval()
             model.load_weights(args.model_name, torch_dtype=torch.bfloat16, device=device)
+            mask_id = 156895
+            eos_id = 156892
         elif args.model_type=='llada':
-            model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device=device).eval()
+            model = LLaDAModelLM.from_pretrained(args.model_name, torch_dtype=torch.bfloat16, init_device=str(device)).eval()
+            mask_id = 126336
+            eos_id = 126081
         else:
             raise ValueError('model type not supported')
         
@@ -92,12 +98,12 @@ def main(world_size, rank, gpu_id, args):
 
         if args.parallel_decoding == 'threshold':
             if args.use_credit:
-                decoder = CreditThresholdParallelDecoder(temperature=0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+                decoder = CreditThresholdParallelDecoder(temperature=0, threshold=args.threshold, mask_id=mask_id, eos_id=eos_id)
             else:
-                decoder = ThresholdParallelDecoder(temperature=0, threshold=args.threshold, mask_id=156895, eos_id=156892)
+                decoder = ThresholdParallelDecoder(temperature=0, threshold=args.threshold, mask_id=mask_id, eos_id=eos_id)
 
         else:
-            decoder = HierarchyDecoder(temperature=0, threshold=args.threshold, low_threshold=args.low_threshold, mask_id=156895, eos_id=156892)
+            decoder = HierarchyDecoder(temperature=0, threshold=args.threshold, low_threshold=args.low_threshold, mask_id=mask_id, eos_id=eos_id)
         use_sw = args.prefix_look > 0 or args.after_look > 0 or args.warmup_times > 0
             
         if args.cache == 'prefix' or args.cache == 'dual':
