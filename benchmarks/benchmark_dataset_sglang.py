@@ -21,42 +21,6 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 
 
-
-from sglang.srt.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
-import ctypes, os, socket
-
-import sgl_kernel.allreduce as custom_ops
-
-def create_shared_buffer(size_in_bytes: int):
-    lib, group = CudaRTLibrary(), dist.group.WORLD
-    ptr = lib.cudaMalloc(size_in_bytes)
-    handle = lib.cudaIpcGetMemHandle(ptr)
-    world_size = dist.get_world_size(group)
-    rank = dist.get_rank(group)
-
-    send = torch.ByteTensor(list(ctypes.string_at(ctypes.addressof(handle),
-                                                  ctypes.sizeof(handle)))).cuda(rank)
-    recv = [torch.empty_like(send) for _ in range(world_size)]
-    dist.all_gather(recv, send)
-    ptrs = []
-    for i, t in enumerate(recv):
-        if i == rank:
-            ptrs.append(ptr.value)
-        else:
-            hdl = type(handle)()
-            ctypes.memmove(ctypes.addressof(hdl), bytes(t.cpu().tolist()), ctypes.sizeof(handle))
-            ptrs.append(lib.cudaIpcOpenMemHandle(hdl).value)
-    dist.barrier()
-    return ptrs
-
-def free_shared_buffer(ptrs):
-    rank = dist.get_rank()
-    if ptrs and len(ptrs) > rank and ptrs[rank] is not None:
-        CudaRTLibrary().cudaFree(ctypes.c_void_p(ptrs[rank]))
-    dist.barrier()
-    
-
-
 def setup_distributed(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '12345'
@@ -109,19 +73,6 @@ def cal_bucket_len(args, all_input_ids):
         padded_gen_lens.append(padded_length - input_ids.shape[1])
     return padded_gen_lens
 
-def warmup_cudagraph(rank, device, dllm, args):
-    batch_size = args.batch_size
-    if rank==0:
-        print('warmup')
-        print(used_buckets)
-        iterator = tqdm.tqdm(used_buckets)
-    else:
-        iterator = used_buckets
-    offset = 0
-    for i in iterator:   
-        input_ids = torch.randint(0, 140000, (batch_size, i - args.gen_len+offset), dtype=torch.long, device=device)
-        dllm.generate(input_ids, gen_length=args.gen_len, block_length=args.block_length)
-
 def cut_eos(data, eos_id=156892):
     eos_indices = (data[0] == eos_id).nonzero(as_tuple=True)[0]
     if eos_indices.numel() > 0:
@@ -166,7 +117,7 @@ def main(world_size, rank, gpu_id, args):
         model_config=model_config,
     )
     initialize_moe_config(server_args)
-    model = LLaDA2SGLangLM(config=model_config).eval()
+    model = LLaDA2SGLangLM(config=model_config, expert_map_path='').eval()
     torch.set_default_dtype(torch.bfloat16)
     model.load_weights(args.model_name, device=device)
     initialize_moe_config(server_args)
@@ -189,7 +140,7 @@ def main(world_size, rank, gpu_id, args):
     warmup_decoder = ThresholdParallelDecoder(temperature=0, threshold=0.2, mask_id=156895, eos_id=156892)
     use_sw = args.prefix_look > 0 or args.after_look > 0 or args.warmup_times > 0
     if args.cache == 'prefix' or args.cache == 'dual':
-        cache_factory=KVCacheFactory(args.cache, is_bd_model=args.use_bd)
+        cache_factory=KVCacheFactory(args.cache, is_bd_model=args.use_bd, backend='sglang')
     else:
         cache_factory=None
 
@@ -209,11 +160,10 @@ def main(world_size, rank, gpu_id, args):
                 dllm = BlockWiseDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=True, use_shift=args.use_shift)
                 warmup_dllm = BlockWiseDiffusionLLM(model, warmup_decoder, BlockIteratorFactory(start_block_align=True), cache_factory=cache_factory, early_stop=False, use_shift=args.use_shift)
     else:
-        dllm = BlockDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True, use_block_diffusion=True), cache_factory=cache_factory, early_stop=True, maximum_unroll=4, expected_tpf=4)
-        warmup_dllm = BlockDiffusionLLM(model, warmup_decoder, BlockIteratorFactory(start_block_align=True, use_block_diffusion=True), cache_factory=cache_factory, early_stop=False, maximum_unroll=4, expected_tpf=4)
+        dllm = BlockDiffusionLLM(model, decoder, BlockIteratorFactory(start_block_align=True, use_block_diffusion=True), cache_factory=cache_factory, early_stop=True, maximum_unroll=4, expected_tpf=4, backend='sglang')
+        warmup_dllm = BlockDiffusionLLM(model, warmup_decoder, BlockIteratorFactory(start_block_align=True, use_block_diffusion=True), cache_factory=cache_factory, early_stop=False, maximum_unroll=4, expected_tpf=4, backend='sglang')
 
     batch_size = args.batch_size
-    # warmup_cudagraph(rank, device, dllm, args)
     
 
     input_lengths = [inp.size(-1) for inp in all_input_ids]
@@ -237,14 +187,7 @@ def main(world_size, rank, gpu_id, args):
         total_token = 0
         token_numbers = []
         total_time = 0
-        last_prefill_length = -1
         for i in iterator:   
-            if i==2:
-                torch.cuda.cudart().cudaProfilerStart()
-            if i==6:
-                torch.cuda.cudart().cudaProfilerStop()
-            # if i==20:
-            #     break
             input_ids = sorted_input_ids[i:i+batch_size]
 
             prefill_blocks = input_ids[-1].shape[1] // block_length
@@ -252,25 +195,10 @@ def main(world_size, rank, gpu_id, args):
 
             max_length = input_ids[-1].shape[1]
             min_padded_length = sorted_padded_gen_lens[i+len(input_ids)-1]
-            # print([input_id.shape[1] for input_id in input_ids], prefill_blocks, prefill_length, min_padded_length, [sorted_padded_gen_lens[i+j] for j in range(len(input_ids))], min_padded_length+max_length)
             batch_input_ids= torch.zeros((len(input_ids), max_length), dtype=torch.long, device=device).fill_(156895)
             for j in range(len(input_ids)):
                 batch_input_ids[j, :input_ids[j].shape[1]] = input_ids[j].to(device)
             input_ids = batch_input_ids
-            if prefill_length != last_prefill_length:
-                if rank==0:
-                    print(f'warmup {i}, prefill length: {prefill_length}, sample length: {sorted_input_ids[i].shape[1]}')
-                out = warmup_dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
-                out = warmup_dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
-                # out = warmup_dllm.generate(sorted_input_ids[i], gen_length=sorted_padded_gen_lens[i], block_length=block_length)
-                last_prefill_length = prefill_length
-                if rank==0:
-                    print(f'warmup finished')
-            # if rank==0:
-            #     print(f'per sample warmup')
-            # out = dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)
-            # if rank==0:
-            #     print(f'warmup finished')
             inner_start = time.time()
             prev_forwards = dllm.num_forwards
             out = dllm.generate(input_ids, gen_length=min_padded_length, block_length=block_length)

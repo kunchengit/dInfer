@@ -276,6 +276,7 @@ class BlockIteratorFactory:
         else:
             return BlockIterator(x, block_length, start_block_align=self._start_block_align)
 
+
 class KVCache:
     """ The KV-cache
 
@@ -284,18 +285,21 @@ class KVCache:
     past_key_values : List[torch.Tensor]
         The keys and values of each transformer layer.
     """
-    def __init__(self, past_key_values, length=2048):
-        block_length = 512
-        assert len(past_key_values) % 2 == 0
-        self._raw_data = past_key_values
-        self.consolidate_raw()
-        
-        self.length = max((self._raw_data.shape[4]+block_length-1)//block_length*block_length, length)
-        device = self._raw_data.device
-        num_layer, _, batch_size, num_heads, seq_len, hidden_dim = self._raw_data.shape
-        self._data = torch.zeros(num_layer, 2, batch_size, num_heads, self.length, hidden_dim, device=device, dtype=torch.bfloat16)
-        self._data[:, :, :, :, :seq_len] = self._raw_data
-
+    def __init__(self, past_key_values, backend='vllm', length=2048):
+        if backend == 'vllm':
+            assert len(past_key_values) % 2 == 0
+            self._data = past_key_values
+        else:
+            self.block_length = 512
+            assert len(past_key_values) % 2 == 0
+            self._raw_data = past_key_values
+            self._consolidate_raw()
+            
+            self.length = max((self._raw_data.shape[4]+self.block_length-1)//self.block_length*self.block_length, length)
+            device = self._raw_data.device
+            num_layer, _, batch_size, num_heads, seq_len, hidden_dim = self._raw_data.shape
+            self._data = torch.zeros(num_layer, 2, batch_size, num_heads, self.length, hidden_dim, device=device, dtype=torch.bfloat16)
+            self._data[:, :, :, :, :seq_len] = self._raw_data
     def consolidate(self):
         if isinstance(self._data, torch.Tensor):
             return
@@ -305,7 +309,7 @@ class KVCache:
         # The shape is [num_layers, 2, batch_size, num_heads, seq_len, hidden_dim]
         self._data = torch.stack(self._data, dim=0).reshape(num_layers, 2, *inner_shape)
 
-    def consolidate_raw(self):
+    def _consolidate_raw(self):
         if isinstance(self._raw_data, torch.Tensor):
             return
 
@@ -336,7 +340,7 @@ class KVCache:
         assert isinstance(self._data, torch.Tensor)
         return self._data[layer_idx][1]
 
-    def update(self, key_states, val_states, layer_idx, replace_position=None):
+    def update(self, key_states, val_states, layer_idx, replace_position=None, backend='vllm'):
         """ Update the keys and values of a transformer layer.
 
         Parameters
@@ -355,11 +359,23 @@ class KVCache:
         torch.Tensor: the new keys for the entire sequence of the transformer layer.
         torch.Tensor: the new values for the entire sequence of the transformer layer.
         """
-        cache_length = self.get_keys(layer_idx).shape[2]
-        block_length = key_states.shape[2]
-        keys = self.get_keys(layer_idx).slice_scatter(key_states, dim=2, start=cache_length - block_length, end=cache_length)
-        values = self.get_values(layer_idx).slice_scatter(val_states, dim=2, start=cache_length - block_length, end=cache_length)
+        if backend ==  'vllm':
+            # This is dual cache.
+            if replace_position is not None:
+                # print(layer_idx, key_states.shape, replace_position, self.get_keys(layer_idx).shape)
+                keys = self.get_keys(layer_idx).slice_scatter(key_states, dim=2, start=replace_position[0], end=replace_position[1])
+                values = self.get_values(layer_idx).slice_scatter(val_states, dim=2, start=replace_position[0], end=replace_position[1])
+            else:
+                # This is prefix cache.
+                keys = torch.cat([self.get_keys(layer_idx), key_states], dim=2)
+                values = torch.cat([self.get_values(layer_idx), val_states], dim=2)
+        else:
+            cache_length = self.get_keys(layer_idx).shape[2]
+            block_length = key_states.shape[2]
+            keys = self.get_keys(layer_idx).slice_scatter(key_states, dim=2, start=cache_length - block_length, end=cache_length)
+            values = self.get_values(layer_idx).slice_scatter(val_states, dim=2, start=cache_length - block_length, end=cache_length)
         return keys, values
+
 
 class DiffusionKVCacheManager:
     """ KV-cache for diffusion LLM.
@@ -370,13 +386,14 @@ class DiffusionKVCacheManager:
     keys and values can be updated and the frequency of the keys and values can be updated.
 
     """
-    def __init__(self, cache_update_freq=None, cache_type='prefix'):
+    def __init__(self, cache_update_freq=None, cache_type='prefix', backend='vllm'):
         self.past_key_values = None
         self.block_start = None
         self.block_end = None
         self.cache_update_freq = cache_update_freq
         assert cache_type in ['prefix', 'dual']
         self.cache_type = cache_type
+        self.backend=backend
 
     def require_update(self, iter_no, block_start, block_end):
         """ require to update the kv-cache.
@@ -420,7 +437,7 @@ class DiffusionKVCacheManager:
         if isinstance(past_key_values, KVCache):
             self.past_key_values = past_key_values
         else:
-            self.past_key_values = KVCache(past_key_values)
+            self.past_key_values = KVCache(past_key_values, self.backend)
         # We should make sure the kv-cache in all layers are converted into a tensor.
         self.past_key_values.consolidate()
         
@@ -442,9 +459,9 @@ class DiffusionKVCacheManager:
             self.past_key_values = past_key_values
         else:
             if block_length>0:
-                self.past_key_values = KVCache([torch.cat((kv[:, :, range_start:range_end-block_length], kv[:, :, -block_length:]), dim=2) for kv in past_key_values])
+                self.past_key_values = KVCache([torch.cat((kv[:, :, range_start:range_end-block_length], kv[:, :, -block_length:]), dim=2) for kv in past_key_values], self.backend)
             else:
-                self.past_key_values = KVCache([kv[:, :, range_start:range_end] for kv in past_key_values])
+                self.past_key_values = KVCache([kv[:, :, range_start:range_end] for kv in past_key_values], self.backend)
         # We should make sure the kv-cache in all layers are converted into a tensor.
         self.past_key_values.consolidate()
         # print(self.past_key_values._data.shape)
@@ -466,10 +483,6 @@ class DiffusionKVCacheManager:
         """
         # The key-value cache cannot be empty.
         assert self.past_key_values is not None
-        # print('get_key_values', self.past_key_values._data.shape)
-
-        # self.block_start = block_start
-        # self.block_end = block_end
         if self.cache_type == 'prefix':
             replace_position = (int(block_start), int(self.past_key_values.seq_len))
         else:
@@ -495,12 +508,17 @@ class BlockDiffusionPrefixCacheManager(DiffusionKVCacheManager):
             The extended length (equvelent to block length)
         
         """
-        cur_kv_length = self.past_key_values._data.shape[-2]
-        aligned_end = (end+511)//512*512
-        if aligned_end <= cur_kv_length:
-            return
-        extended_cache = F.pad(self.past_key_values._data, pad=(0, 0, 0, aligned_end-cur_kv_length), mode='constant', value=0)
-        self.past_key_values._data = extended_cache
+        if self.backend == 'vllm':
+            cur_kv_length = self.past_key_values._data.shape[-2]
+            extended_cache = F.pad(self.past_key_values._data, pad=(0, 0, 0, end-cur_kv_length), mode='constant', value=0)
+            self.past_key_values._data = extended_cache
+        else:
+            cur_kv_length = self.past_key_values._data.shape[-2]
+            aligned_end = (end+self.past_key_values.block_length-1)//self.past_key_values.block_length*self.past_key_values.block_length
+            if aligned_end <= cur_kv_length:
+                return
+            extended_cache = F.pad(self.past_key_values._data, pad=(0, 0, 0, aligned_end-cur_kv_length), mode='constant', value=0)
+            self.past_key_values._data = extended_cache
 
 
 class KVCacheFactory:
@@ -508,14 +526,15 @@ class KVCacheFactory:
 
     This class generates KV-cache for the diffusion LLM when it runs diffusion iterations.
     """
-    def __init__(self, cache_type, cache_update_freq=None, is_bd_model=False):
+    def __init__(self, cache_type, cache_update_freq=None, is_bd_model=False, backend='vllm'):
         self.cache_type = cache_type
         self.cache_update_freq = cache_update_freq
         self.is_bd_model=is_bd_model
+        self.backend = backend
 
     def create(self):
         if self.is_bd_model:
-            return BlockDiffusionPrefixCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type)
+            return BlockDiffusionPrefixCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type, backend=self.backend)
         else:
             return DiffusionKVCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type)
 
