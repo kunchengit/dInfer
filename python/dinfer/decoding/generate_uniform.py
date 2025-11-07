@@ -151,8 +151,8 @@ class BlockDiffusionRunner(BlockRunner):
         if kv_cache is None:
             return
         else:
-            output = model(block, use_cache=True, attention_mask=attn_mask, position_ids=pos_ids)
-            kv_cache.update(output.past_key_values)
+            output = model(block.clone(memory_format=torch.contiguous_format), use_cache=True, attention_mask=attn_mask, position_ids=pos_ids.clone(memory_format=torch.contiguous_format))
+            kv_cache.range_update(output.past_key_values, 0, block.size(1), 0)
             self.diff_iteration.num_forwards +=1
             self.diff_iteration.iter_no +=1
 
@@ -210,14 +210,14 @@ class BlockDiffusionRunner(BlockRunner):
         # additional forward to update kvcache for the last decoding step in the current block
         if kv_cache is not None:
             if input_block_mask_number > 0:
-                output = model(block, 
+                output = model(block.clone(memory_format=torch.contiguous_format), 
                     past_key_values=past_key_values,
                     use_cache=True, 
-                    position_ids=pos_ids[:, block_loc.start:block_loc.end],
-                    replace_position=replace_position)
+                    position_ids=pos_ids[:, block_loc.start:block_loc.end].clone(memory_format=torch.contiguous_format),
+                    replace_position=(0,0))
                 self.diff_iteration.num_forwards +=1
                 self.diff_iteration.iter_no +=1
-            kv_cache.update(output.past_key_values)
+            kv_cache.range_update(output.past_key_values, 0, block_loc.end, block_loc.end - block_loc.start)
 
 
 
@@ -342,14 +342,14 @@ class BlockDiffusionIteration:
                 position_ids=pos_ids[:, :block_loc.end])
             logits = output.logits[:, block_loc.start:block_loc.end]
         else:
-            output = model(block,
-                position_ids=pos_ids[:,block_loc.start:block_loc.end],
+            output = model(block.clone(memory_format=torch.contiguous_format),
+                position_ids=pos_ids[:,block_loc.start:block_loc.end].clone(memory_format=torch.contiguous_format),
                 use_cache=True,
                 past_key_values=past_key_values,
-                replace_position=replace_position)
+                replace_position=(0, 0))
             logits = output.logits
             # TODO(dulun): we don't need update kv cache for every step.
-            kv_cache.update(output.past_key_values)
+            # kv_cache.update(output.past_key_values)
             
         decoder.decode(logits, block_loc.start, block_loc.end, x)
         self.num_forwards += 1
