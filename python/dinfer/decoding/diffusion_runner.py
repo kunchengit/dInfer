@@ -172,6 +172,7 @@ class ModelRunner:
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        kv_info_sg=None,
     ):
         backup_ca_comm = self.tp_group.ca_comm
         _to_torch(self.model, reverse=False, num_tokens=input_ids.numel())
@@ -184,6 +185,7 @@ class ModelRunner:
             replace_position=replace_position,
             use_cache=use_cache,
             attention_mask=attention_mask,
+            kv_info_sg=kv_info_sg,
         )
         self.tp_group.ca_comm = backup_ca_comm
         
@@ -199,14 +201,23 @@ class ModelRunner:
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        kv_info_sg=None,
     ):
         if isinstance(past_key_values, KVCache):
             past_key_values = past_key_values._data
         
+        uses_sglang_cache = kv_info_sg is not None
+        
         # 简化判断：如果 input_ids 的 seq_len 为 block_length，则认为是 decode 阶段
-        is_decode_phase = input_ids is not None and input_ids.shape[1] == self.block_length and use_cache and past_key_values is not None
+        is_decode_phase = (
+            input_ids is not None
+            and input_ids.shape[1] == self.block_length
+            and use_cache
+            and (past_key_values is not None or uses_sglang_cache)
+        )
         can_run_graph = bool(
             is_decode_phase
+            and not uses_sglang_cache
             and self.graph_runner
             and self.graph_runner.can_run(input_ids, position_ids, past_key_values)
         )
@@ -220,7 +231,17 @@ class ModelRunner:
             return ret
 
         # print('run normal')
-        ret = self.forward_normal(input_ids, position_ids, inputs_embeds, pp_proxy_tensors, past_key_values, replace_position, use_cache, attention_mask)
+        ret = self.forward_normal(
+            input_ids,
+            position_ids,
+            inputs_embeds,
+            pp_proxy_tensors,
+            past_key_values,
+            replace_position,
+            use_cache,
+            attention_mask,
+            kv_info_sg=kv_info_sg,
+        )
         # if ret.past_key_values is None:
         # else:
         #     print('run normal', len(ret.past_key_values))
@@ -399,3 +420,4 @@ class CudaGraphRunner:
 
         output = self.output_buffers[self.bs]
         return output
+

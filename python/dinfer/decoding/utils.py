@@ -5,6 +5,8 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+from dinfer.kv_cache import BlockDiffusionSGLangCacheManager
+
 def add_gumbel_noise(logits, temperature):
     '''
     The Gumbel max is a method for sampling categorical distributions.
@@ -526,17 +528,44 @@ class KVCacheFactory:
 
     This class generates KV-cache for the diffusion LLM when it runs diffusion iterations.
     """
-    def __init__(self, cache_type, cache_update_freq=None, is_bd_model=False, backend='vllm'):
+
+    def __init__(
+        self,
+        cache_type,
+        cache_update_freq=None,
+        is_bd_model=False,
+        backend='vllm',
+        server_args=None,
+        model_config=None,
+        dtype=torch.bfloat16,
+    ):
         self.cache_type = cache_type
         self.cache_update_freq = cache_update_freq
-        self.is_bd_model=is_bd_model
+        self.is_bd_model = is_bd_model
         self.backend = backend
+        self.server_args = server_args
+        self.model_config = model_config
+        self.dtype = dtype
 
     def create(self):
+        if self.backend == 'sglang':
+            if self.model_config is None:
+                raise ValueError("model_config must be provided for sglang KV cache.")
+            return BlockDiffusionSGLangCacheManager(
+                model_config=self.model_config,
+                server_args=self.server_args,
+                dtype=self.dtype,
+            )
         if self.is_bd_model:
-            return BlockDiffusionPrefixCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type, backend=self.backend)
+            return BlockDiffusionPrefixCacheManager(
+                cache_update_freq=self.cache_update_freq,
+                cache_type=self.cache_type,
+                backend=self.backend,
+            )
         else:
-            return DiffusionKVCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type)
+            return DiffusionKVCacheManager(
+                cache_update_freq=self.cache_update_freq, cache_type=self.cache_type
+            )
 
 def gather_sequence_block(partial_data, partial_start, partial_end, block_start, block_end, rank, world_size):
     """ Gather the wanted block data from the partitioned data.

@@ -124,6 +124,7 @@ def main(world_size, rank, gpu_id, args):
     
     
     model = model.to(device)
+    model_dtype = next(model.parameters()).dtype
     x = torch.arange(32, dtype=torch.long, device=device).unsqueeze(0).repeat(args.batch_size, 1)
     out = model(x, use_cache=True)
     model = ModelRunner(model, device, server_args=server_args)
@@ -140,7 +141,14 @@ def main(world_size, rank, gpu_id, args):
     warmup_decoder = ThresholdParallelDecoder(temperature=0, threshold=0.2, mask_id=156895, eos_id=156892)
     use_sw = args.prefix_look > 0 or args.after_look > 0 or args.warmup_times > 0
     if args.cache == 'prefix' or args.cache == 'dual':
-        cache_factory=KVCacheFactory(args.cache, is_bd_model=args.use_bd, backend='sglang')
+        cache_factory = KVCacheFactory(
+            args.cache,
+            is_bd_model=args.use_bd,
+            backend='sglang',
+            server_args=server_args,
+            model_config=model_config,
+            dtype=model_dtype,
+        )
     else:
         cache_factory=None
 

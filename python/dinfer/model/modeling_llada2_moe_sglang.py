@@ -47,11 +47,11 @@ def torch_all_gather(input_: torch.Tensor) -> torch.Tensor:
     # print()
     # exit()
     # world_size = sglang_distributed.get_tensor_model_parallel_world_size()
-    # # 2. 给每个 rank 预分配输出缓冲区
+    # # 2. 给每�?rank 预分配输出缓冲区
     # output_list = [torch.empty_like(tensor) for _ in range(world_size)]
     # # 3. 集合通信
     # torch.distributed.all_gather(output_list, tensor)
-    # # 4. 在 0 维拼接，和 SGLang 原生行为保持一致
+    # # 4. �?0 维拼接，�?SGLang 原生行为保持一�?
     # return torch.cat(output_list, dim=0)
     input_size = input_.size()
     world_size = sglang_distributed.get_tensor_model_parallel_world_size()
@@ -122,6 +122,7 @@ from sglang.srt.models.utils import (
 )
 from sglang.srt.utils import add_prefix, is_cuda, is_non_idle_and_non_empty, make_layers
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
+from dinfer.kv_cache import CacheInfoSglang
 
 
 class RMSNorm(nn.Module):
@@ -559,7 +560,7 @@ class LLaDA2SparseMoeBlock(nn.Module):
 
 
     # def _save_record(self, tensor: torch.Tensor):
-    #     """将 (layer_id, stage, tensor, info) 追加保存到共享 .npy 文件"""
+    #     """�?(layer_id, stage, tensor, info) 追加保存到共�?.npy 文件"""
     #     if tensor is None:
     #         return
     #     # 转为 CPU NumPy
@@ -569,7 +570,7 @@ class LLaDA2SparseMoeBlock(nn.Module):
     #         'layer_id': self.layer_id,
     #         'tensor': tensor_np,
     #     }
-    #     # 以追加模式写入 .npy
+    #     # 以追加模式写�?.npy
     #     with open(self.topk_filename, 'ab') as f:
     #         np.save(f, record)
             
@@ -828,78 +829,136 @@ class LLaDA2Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        past_key_values = None,
+        past_key_values=None,
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        attention_mask: Optional[torch.Tensor]=None,
+        attention_mask: Optional[torch.Tensor] = None,
+        kv_info_sg: Optional[CacheInfoSglang] = None,
     ) -> torch.Tensor:
         if hidden_states.shape[0] == 0:
             return hidden_states
+
         bsz, q_len, _ = hidden_states.size()
         qkv, _ = self.query_key_value(hidden_states)
-        # print("qkv", qkv.shape, 'size', self.q_size, self.kv_size, self.kv_size)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        # print(1, q.shape, k.shape, v.shape, positions.shape)
         if self.use_qk_norm:
             q, k = self._apply_qk_norm(q, k)
-        
-        # q, k = apply_rotary_pos_emb(q, k, *self.rotary_emb(positions), unsqueeze_dim=1)
-        # print('rope:', positions.shape, q.shape, k.shape)
+
         q, k = self.rotary_emb(
             positions.flatten(),
             q.flatten(0, 1),
             k.flatten(0, 1),
             fused_set_kv_buffer_arg=None,
         )
-        # print(2, q.shape, k.shape, v.shape, self.layer_id, replace_position)
 
         q = q.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(bsz, -1, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(bsz, -1, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
         present_key_values = None
-        if past_key_values is not None:
-            cache_k = past_key_values[0]
-            cache_v = past_key_values[1]
+        padding_bias = None
+        if kv_info_sg is not None:
+            self._save_new_kv_buffers(kv_info_sg, k, v)
+            k, v = self._gather_cached_kv(kv_info_sg)
+            padding_bias = self._build_padding_mask(
+                kv_info_sg.seq_lens,
+                kv_info_sg.max_seq_len,
+                q.shape[2],
+                q.device,
+                q.dtype,
+            )
+            present_key_values = ()
+        elif past_key_values is not None:
+            cache_k, cache_v = past_key_values
             cache_length = cache_k.shape[2]
             block_length = k.shape[2]
-            k = cache_k.slice_scatter(k, dim=2, start=cache_length - block_length, end=cache_length)
-            v = cache_v.slice_scatter(v, dim=2, start=cache_length - block_length, end=cache_length)
-            # k, v = past_key_values.update(k, v, self.layer_id, replace_position)
-        if use_cache:
-            present_key_values = (k, v)
-        
-        # print(3, q.shape, k.shape, v.shape)
-        
-        # q = q.transpose(1, 2)
-        # k = k.transpose(1, 2)
-        # v = v.transpose(1, 2)
+            k = cache_k.slice_scatter(
+                k, dim=2, start=cache_length - block_length, end=cache_length
+            )
+            v = cache_v.slice_scatter(
+                v, dim=2, start=cache_length - block_length, end=cache_length
+            )
+            if use_cache:
+                present_key_values = (k, v)
+
         k = repeat_kv(k, self.num_key_value_groups)
         v = repeat_kv(v, self.num_key_value_groups)
 
-        # print(4, q.shape, k.shape, v.shape)
+        attn_mask = None
         if attention_mask is not None:
-            attention_mask = attention_mask.to(q.dtype)
-        # print('attn:', q.shape, k.shape, v.shape, attention_mask.shape if attention_mask is not None else None)
-        if attention_mask is not None:
-            if len(attention_mask.shape)==3:
-                attention_mask = attention_mask.unsqueeze(1)
+            attn_mask = attention_mask.to(q.dtype)
+            if len(attn_mask.shape) == 3:
+                attn_mask = attn_mask.unsqueeze(1)
+        if padding_bias is not None:
+            attn_mask = padding_bias if attn_mask is None else attn_mask + padding_bias
+
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             q,
             k,
             v,
-            attn_mask=attention_mask,
+            attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, -1)
-        # print(5, attn_output.shape)
-
         attn_output, _ = self.dense(attn_output)
-        # print(6, attn_output.shape)
         return attn_output, present_key_values
+
+    def _save_new_kv_buffers(
+        self, kv_info_sg: CacheInfoSglang, cache_k: torch.Tensor, cache_v: torch.Tensor
+    ):
+        loc = kv_info_sg.cache_loc.reshape(-1)
+        k_payload = cache_k.permute(0, 2, 1, 3).reshape(
+            -1, self.num_kv_heads, self.head_dim
+        )
+        v_payload = cache_v.permute(0, 2, 1, 3).reshape(
+            -1, self.num_kv_heads, self.head_dim
+        )
+        kv_info_sg.token_to_kv_pool.set_kv_buffer(self, loc, k_payload, v_payload)
+
+    def _gather_cached_kv(
+        self, kv_info_sg: CacheInfoSglang
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        key_buffer = kv_info_sg.token_to_kv_pool.get_key_buffer(self.layer_id)
+        value_buffer = kv_info_sg.token_to_kv_pool.get_value_buffer(self.layer_id)
+        indices = kv_info_sg.page_table.reshape(-1)
+        gathered_k = key_buffer.index_select(0, indices)
+        gathered_v = value_buffer.index_select(0, indices)
+        bsz = kv_info_sg.page_table.shape[0]
+        max_seq_len = kv_info_sg.max_seq_len
+        gathered_k = (
+            gathered_k.view(bsz, max_seq_len, self.num_kv_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        gathered_v = (
+            gathered_v.view(bsz, max_seq_len, self.num_kv_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        return gathered_k, gathered_v
+
+    def _build_padding_mask(
+        self,
+        seq_lens: torch.Tensor,
+        max_seq_len: int,
+        q_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Optional[torch.Tensor]:
+        if max_seq_len == 0:
+            return None
+        positions = torch.arange(max_seq_len, device=device)
+        valid = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
+        mask = (~valid).unsqueeze(1).unsqueeze(2)
+        mask = mask.expand(-1, 1, q_len, -1)
+        if not mask.any():
+            return None
+        bias = torch.zeros(mask.shape, device=device, dtype=dtype)
+        bias.masked_fill_(mask, torch.finfo(dtype).min)
+        return bias
 
 
 class LLaDA2Block(nn.Module):
@@ -988,10 +1047,11 @@ class LLaDA2Block(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-        past_key_values = None,
+        past_key_values=None,
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        attention_mask: Optional[torch.Tensor]=None,
+        attention_mask: Optional[torch.Tensor] = None,
+        kv_info_sg: Optional[CacheInfoSglang] = None,
     ) -> torch.Tensor:
         bsz, q_len, h = hidden_states.size()
         hidden_states, residual = self.layer_communicator.prepare_attn(
@@ -1009,6 +1069,7 @@ class LLaDA2Block(nn.Module):
             replace_position=replace_position,
             use_cache=use_cache,
             attention_mask=attention_mask,
+            kv_info_sg=kv_info_sg,
         )
         # hidden_states = hidden_states.flatten(0, 1)
         # residual = residual.flatten(0, 1)
@@ -1098,12 +1159,13 @@ class LLaDA2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        past_key_values = None,
+        past_key_values=None,
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        attention_mask: Optional[torch.Tensor]=None,
+        attention_mask: Optional[torch.Tensor] = None,
+        kv_info_sg: Optional[CacheInfoSglang] = None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
         if self.pp_group.is_first_rank:
             if input_embeds is None:
@@ -1128,6 +1190,7 @@ class LLaDA2Model(nn.Module):
                 replace_position=replace_position,
                 use_cache=use_cache,
                 attention_mask=attention_mask,
+                kv_info_sg=kv_info_sg,
             )
             if use_cache:
                 all_present_key_values.extend(present_key_values)
@@ -1170,7 +1233,7 @@ class LLaDA2SGLangLM(nn.Module):
         self.device = torch.device('cpu')
         self.expert_map_path=expert_map_path
 
-        # tie_word_embeddings为true，复用tie_word_embeddings，反之是独立的
+        # tie_word_embeddings为true，复用tie_word_embeddings，反之是独立�?
         if config.tie_word_embeddings:
             self.lm_head = self.model.word_embeddings
         else:
@@ -1218,6 +1281,7 @@ class LLaDA2SGLangLM(nn.Module):
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         attention_mask: Optional[torch.Tensor]=None,
+        kv_info_sg: Optional[CacheInfoSglang] = None,
     ) -> MoeCausalLMOutputWithPast:
         self.device = input_ids.device if input_ids is not None else inputs_embeds.device
         if position_ids is None:
@@ -1240,6 +1304,7 @@ class LLaDA2SGLangLM(nn.Module):
             replace_position=replace_position,
             use_cache=use_cache,
             attention_mask=attention_mask,
+            kv_info_sg=kv_info_sg,
         )
         hidden_states = hidden_states
         logits = self.lm_head(hidden_states)
