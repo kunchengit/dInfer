@@ -130,8 +130,9 @@ class BlockDiffusionRunner(BlockRunner):
     expected_tpf : int
         The expected TPF for loop unrolling.
     """
-    def __init__(self, diff_iteration, early_stop, maximum_unroll, expected_tpf):
+    def __init__(self, diff_iteration, early_stop, maximum_unroll, expected_tpf, backend):
         super().__init__(diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        self.backend = backend
 
     def prefill(self, model, block, kv_cache, pos_ids, attn_mask):
         """ Prefill for KV Cache
@@ -151,8 +152,11 @@ class BlockDiffusionRunner(BlockRunner):
         if kv_cache is None:
             return
         else:
-            output = model(block, use_cache=True, attention_mask=attn_mask, position_ids=pos_ids)
-            kv_cache.update(output.past_key_values)
+            output = model(block.clone(memory_format=torch.contiguous_format), use_cache=True, attention_mask=attn_mask, position_ids=pos_ids.clone(memory_format=torch.contiguous_format))
+            if self.backend == 'vllm':
+                kv_cache.update(output.past_key_values)
+            else:
+                kv_cache.range_update(output.past_key_values, 0, block.size(1), 0)
             self.diff_iteration.num_forwards +=1
             self.diff_iteration.iter_no +=1
 
@@ -200,7 +204,7 @@ class BlockDiffusionRunner(BlockRunner):
             unroll_k = int(max(min((block == decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 2))
             for unroll_i in range(unroll_k):
                 input_block_mask_number = (block == decoder.mask_id).sum()
-                output = self.diff_iteration.forward(model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position)
+                output = self.diff_iteration.forward(model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position, self.backend)
             if batch_size > 1:
                 seq_idx, x = select_undecoded(seq_idx, orig_x, x, block, block_loc, decoder.mask_id, writeback=True)
                 block = x[:, block_loc.start:block_loc.end]
@@ -210,14 +214,17 @@ class BlockDiffusionRunner(BlockRunner):
         # additional forward to update kvcache for the last decoding step in the current block
         if kv_cache is not None:
             if input_block_mask_number > 0:
-                output = model(block, 
+                output = model(block.clone(memory_format=torch.contiguous_format), 
                     past_key_values=past_key_values,
                     use_cache=True, 
-                    position_ids=pos_ids[:, block_loc.start:block_loc.end],
-                    replace_position=replace_position)
+                    position_ids=pos_ids[:, block_loc.start:block_loc.end].clone(memory_format=torch.contiguous_format),
+                    replace_position=(0,0) if self.backend=='sglang' else replace_position)
                 self.diff_iteration.num_forwards +=1
                 self.diff_iteration.iter_no +=1
-            kv_cache.update(output.past_key_values)
+            if self.backend=='vllm':
+                kv_cache.update(output.past_key_values)
+            else:
+                kv_cache.range_update(output.past_key_values, 0, block_loc.end, block_loc.end - block_loc.start)
 
 
 
@@ -306,7 +313,7 @@ class BlockDiffusionIteration:
         self.cache_updates = 0
         self.iter_no = 0
 
-    def forward(self, model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position):
+    def forward(self, model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position, backend):
         """ Decode tokens in a forward run on a block.
 
         The forward run decodes tokens in the input array.
@@ -342,14 +349,15 @@ class BlockDiffusionIteration:
                 position_ids=pos_ids[:, :block_loc.end])
             logits = output.logits[:, block_loc.start:block_loc.end]
         else:
-            output = model(block,
-                position_ids=pos_ids[:,block_loc.start:block_loc.end],
+            output = model(block.clone(memory_format=torch.contiguous_format),
+                position_ids=pos_ids[:,block_loc.start:block_loc.end].clone(memory_format=torch.contiguous_format),
                 use_cache=True,
                 past_key_values=past_key_values,
-                replace_position=replace_position)
+                replace_position=(0,0) if backend=='sglang' else replace_position)
             logits = output.logits
             # TODO(dulun): we don't need update kv cache for every step.
-            kv_cache.update(output.past_key_values)
+            if backend == 'vllm':
+                kv_cache.update(output.past_key_values)
             
         decoder.decode(logits, block_loc.start, block_loc.end, x)
         self.num_forwards += 1
@@ -828,12 +836,12 @@ class BlockDiffusionLLMAttnmask(DiffusionLLM):
         The factory class that generates the iterator on the input token array.
 
     """
-    def __init__(self, model, decoder, iterator_factory, early_stop=True, maximum_unroll=4, expected_tpf=8):
+    def __init__(self, model, decoder, iterator_factory, early_stop=True, maximum_unroll=4, expected_tpf=8, backend='vllm'):
         self.model = model
         self.decoder = decoder
         self.iterator_factory = iterator_factory
         self.diff_iteration = BlockDiffusionIteration()
-        self.block_runner = BlockDiffusionRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        self.block_runner = BlockDiffusionRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf, backend)
         
 
     @property
@@ -900,13 +908,13 @@ class BlockDiffusionLLM(DiffusionLLM):
         The factory class that generates the iterator on the input token array.
 
     """
-    def __init__(self, model, decoder, iterator_factory, cache_factory, early_stop=True, maximum_unroll=4, expected_tpf=8):
+    def __init__(self, model, decoder, iterator_factory, cache_factory, early_stop=True, maximum_unroll=4, expected_tpf=8, backend='vllm'):
         self.model = model
         self.decoder = decoder
         self.iterator_factory = iterator_factory
         self.cache_factory = cache_factory
         self.diff_iteration = BlockDiffusionIteration()
-        self.block_runner = BlockDiffusionRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf)
+        self.block_runner = BlockDiffusionRunner(self.diff_iteration, early_stop, maximum_unroll, expected_tpf, backend)
         self.early_stop = early_stop
 
     @property
