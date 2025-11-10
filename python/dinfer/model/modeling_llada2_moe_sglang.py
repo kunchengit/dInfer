@@ -47,11 +47,11 @@ def torch_all_gather(input_: torch.Tensor) -> torch.Tensor:
     # print()
     # exit()
     # world_size = sglang_distributed.get_tensor_model_parallel_world_size()
-    # # 2. 给每�?rank 预分配输出缓冲区
+    # # 2. ??? rank ????????
     # output_list = [torch.empty_like(tensor) for _ in range(world_size)]
-    # # 3. 集合通信
+    # # 3. ????
     # torch.distributed.all_gather(output_list, tensor)
-    # # 4. �?0 维拼接，�?SGLang 原生行为保持一�?
+    # # 4. ? 0 ????? SGLang ????????
     # return torch.cat(output_list, dim=0)
     input_size = input_.size()
     world_size = sglang_distributed.get_tensor_model_parallel_world_size()
@@ -560,17 +560,17 @@ class LLaDA2SparseMoeBlock(nn.Module):
 
 
     # def _save_record(self, tensor: torch.Tensor):
-    #     """�?(layer_id, stage, tensor, info) 追加保存到共�?.npy 文件"""
+    #     """? (layer_id, stage, tensor, info) ??????? .npy ??"""
     #     if tensor is None:
     #         return
-    #     # 转为 CPU NumPy
+    #     # ?? CPU NumPy
     #     tensor_np = tensor.detach().float().cpu().numpy()
-    #     # 准备记录元组
+    #     # ??????
     #     record = {
     #         'layer_id': self.layer_id,
     #         'tensor': tensor_np,
     #     }
-    #     # 以追加模式写�?.npy
+    #     # ??????? .npy
     #     with open(self.topk_filename, 'ab') as f:
     #         np.save(f, record)
             
@@ -1233,7 +1233,7 @@ class LLaDA2SGLangLM(nn.Module):
         self.device = torch.device('cpu')
         self.expert_map_path=expert_map_path
 
-        # tie_word_embeddings为true，复用tie_word_embeddings，反之是独立�?
+        # tie_word_embeddings为true，夝用tie_word_embeddings，坝之是独立�?
         if config.tie_word_embeddings:
             self.lm_head = self.model.word_embeddings
         else:
@@ -1277,7 +1277,7 @@ class LLaDA2SGLangLM(nn.Module):
         position_ids: torch.Tensor = None,
         inputs_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
-        past_key_values = None,
+        past_key_values=None,
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         attention_mask: Optional[torch.Tensor]=None,
