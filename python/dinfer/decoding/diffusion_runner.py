@@ -87,8 +87,7 @@ def patch_model(
             yield torch.compile(
                 torch.no_grad()(model.forward),
                 mode=os.environ.get(
-                    # "SGLANG_TORCH_COMPILE_MODE", "default"
-                    "SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs"
+                    "SGLANG_TORCH_COMPILE_MODE", "default"
                 ),
                 dynamic=_is_hip and get_bool_env_var("SGLANG_TORCH_DYNAMIC_SHAPE"),
             )
