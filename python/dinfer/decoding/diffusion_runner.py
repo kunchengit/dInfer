@@ -36,7 +36,8 @@ from sglang.srt.model_executor.forward_batch_info import (
 _is_hip = is_hip()
 
 logger = logging.getLogger(__name__)
-# 鍋囪鐨勪笂涓嬫枃绠＄悊鍣紝鐢ㄤ簬鍦ㄦ崟鑾锋湡闂村喕缁撳瀮鍦惧洖鏀?@contextmanager
+# 假设的上下文管理器，用于在捕获期间冻结垃圾回收
+@contextmanager
 def freeze_gc(enable_cudagraph_gc: bool):
     """
     Optimize garbage collection during CUDA graph capture.
@@ -126,7 +127,8 @@ class ModelRunner:
             self.device = device
             self.gpu_id = torch.cuda.current_device()
         self.enable_compile = enable_compile
-        self.enable_cuda_graph = enable_cuda_graph and (device != "cpu") # CPU 妯″紡涓嬬鐢?        self.supported_batch_sizes = supported_batch_sizes or [1, ] # 榛樿鏀寔鐨?batch sizes
+        self.enable_cuda_graph = enable_cuda_graph and (device != "cpu") # CPU 模式下禁用
+        self.supported_batch_sizes = supported_batch_sizes or [1, ] # 默认支持的 batch sizes
         self.max_length = max_length
         self.block_length = block_length
         self.max_batch_size = max(self.supported_batch_sizes)
@@ -137,7 +139,8 @@ class ModelRunner:
         self.token_to_kv_pool_allocator: Optional[TokenToKVPoolAllocator] = None
         self.attn_backend: Optional[FlashAttentionBackend] = None
         self.graph_runner = None
-        # 璁剧疆妯″瀷涓鸿瘎浼版ā寮?        x = torch.arange(block_length, dtype=torch.long, device=device).unsqueeze(0)
+        # 设置模型为评估模式
+        x = torch.arange(block_length, dtype=torch.long, device=device).unsqueeze(0)
         
         self.model.eval()
         self.tp_group = get_tp_group()
@@ -360,7 +363,7 @@ class ModelRunner:
         # if ret.past_key_values is None:
         # else:
         #     print('run normal', len(ret.past_key_values))
-        # 榛樿璺緞锛氭爣鍑?PyTorch 鎵ц
+        # 默认路径：标准 PyTorch 执行
         return ret
     
     def __call__(self, *args, **kwds):
