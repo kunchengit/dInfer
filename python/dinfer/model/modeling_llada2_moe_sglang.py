@@ -792,14 +792,14 @@ class LLaDA2Attention(nn.Module):
             rope_scaling=config.rope_scaling,
         )
         # print(self.rotary_emb, self.rotary_emb.dtype)
-        # self.attn = RadixAttention(
-        #     self.num_heads,
-        #     self.head_dim,
-        #     self.scale,
-        #     num_kv_heads=self.num_kv_heads,
-        #     layer_id=layer_id,
-        #     prefix=add_prefix("attn", prefix),
-        # )
+        self.attn = RadixAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            num_kv_heads=self.num_kv_heads,
+            layer_id=layer_id,
+            prefix=add_prefix("attn", prefix),
+        )
 
         self.alt_stream = alt_stream
 
@@ -833,6 +833,7 @@ class LLaDA2Attention(nn.Module):
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         attention_mask: Optional[torch.Tensor]=None,
+        forward_batch = None,
     ) -> torch.Tensor:
         if hidden_states.shape[0] == 0:
             return hidden_states
@@ -854,52 +855,57 @@ class LLaDA2Attention(nn.Module):
         )
         # print(2, q.shape, k.shape, v.shape, self.layer_id, replace_position)
 
-        q = q.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(bsz, -1, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = v.view(bsz, -1, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        use_sglang_attn = forward_batch is not None and self.attn is not None
 
-        present_key_values = None
-        if past_key_values is not None:
-            cache_k = past_key_values[0]
-            cache_v = past_key_values[1]
-            cache_length = cache_k.shape[2]
-            block_length = k.shape[2]
-            k = cache_k.slice_scatter(k, dim=2, start=cache_length - block_length, end=cache_length)
-            v = cache_v.slice_scatter(v, dim=2, start=cache_length - block_length, end=cache_length)
-            # k, v = past_key_values.update(k, v, self.layer_id, replace_position)
-        if use_cache:
-            present_key_values = (k, v)
-        
-        # print(3, q.shape, k.shape, v.shape)
-        
-        # q = q.transpose(1, 2)
-        # k = k.transpose(1, 2)
-        # v = v.transpose(1, 2)
-        k = repeat_kv(k, self.num_key_value_groups)
-        v = repeat_kv(v, self.num_key_value_groups)
+        if use_sglang_attn:
+            attn_output = self.attn(
+                q,
+                k,
+                v,
+                forward_batch,
+                save_kv_cache=bool(use_cache),
+            )
+            present_key_values = None
+        else:
+            q = q.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
+            k = k.view(bsz, -1, self.num_kv_heads, self.head_dim).transpose(1, 2)
+            v = v.view(bsz, -1, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-        # print(4, q.shape, k.shape, v.shape)
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(q.dtype)
-        # print('attn:', q.shape, k.shape, v.shape, attention_mask.shape if attention_mask is not None else None)
-        if attention_mask is not None:
-            if len(attention_mask.shape)==3:
-                attention_mask = attention_mask.unsqueeze(1)
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=False,
-        )
+            present_key_values = None
+            if past_key_values is not None:
+                cache_k = past_key_values[0]
+                cache_v = past_key_values[1]
+                cache_length = cache_k.shape[2]
+                block_length = k.shape[2]
+                k = cache_k.slice_scatter(
+                    k, dim=2, start=cache_length - block_length, end=cache_length
+                )
+                v = cache_v.slice_scatter(
+                    v, dim=2, start=cache_length - block_length, end=cache_length
+                )
+            if use_cache:
+                present_key_values = (k, v)
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-        # print(5, attn_output.shape)
+            k = repeat_kv(k, self.num_key_value_groups)
+            v = repeat_kv(v, self.num_key_value_groups)
+
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(q.dtype)
+                if len(attention_mask.shape) == 3:
+                    attention_mask = attention_mask.unsqueeze(1)
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                is_causal=False,
+            )
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(bsz, q_len, -1)
 
         attn_output, _ = self.dense(attn_output)
-        # print(6, attn_output.shape)
         return attn_output, present_key_values
 
 
@@ -993,6 +999,7 @@ class LLaDA2Block(nn.Module):
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         attention_mask: Optional[torch.Tensor]=None,
+        forward_batch=None,
     ) -> torch.Tensor:
         bsz, q_len, h = hidden_states.size()
         hidden_states, residual = self.layer_communicator.prepare_attn(
@@ -1010,6 +1017,7 @@ class LLaDA2Block(nn.Module):
             replace_position=replace_position,
             use_cache=use_cache,
             attention_mask=attention_mask,
+            forward_batch=forward_batch,
         )
         # hidden_states = hidden_states.flatten(0, 1)
         # residual = residual.flatten(0, 1)
@@ -1105,6 +1113,7 @@ class LLaDA2Model(nn.Module):
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         attention_mask: Optional[torch.Tensor]=None,
+        forward_batch=None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
         if self.pp_group.is_first_rank:
             if input_embeds is None:
@@ -1129,6 +1138,7 @@ class LLaDA2Model(nn.Module):
                 replace_position=replace_position,
                 use_cache=use_cache,
                 attention_mask=attention_mask,
+                forward_batch=forward_batch,
             )
             if use_cache:
                 all_present_key_values.extend(present_key_values)
@@ -1219,6 +1229,7 @@ class LLaDA2SGLangLM(nn.Module):
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         attention_mask: Optional[torch.Tensor]=None,
+        forward_batch=None,
     ) -> MoeCausalLMOutputWithPast:
         self.device = input_ids.device if input_ids is not None else inputs_embeds.device
         if position_ids is None:
@@ -1241,6 +1252,7 @@ class LLaDA2SGLangLM(nn.Module):
             replace_position=replace_position,
             use_cache=use_cache,
             attention_mask=attention_mask,
+            forward_batch=forward_batch,
         )
         hidden_states = hidden_states
         logits = self.lm_head(hidden_states)

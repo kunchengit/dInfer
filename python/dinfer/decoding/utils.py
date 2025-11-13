@@ -5,6 +5,8 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
+from dinfer.kv_cache import SglangKVCacheManager
+
 def add_gumbel_noise(logits, temperature):
     '''
     The Gumbel max is a method for sampling categorical distributions.
@@ -532,11 +534,21 @@ class KVCacheFactory:
         self.backend = backend
         self.max_length = max_length
 
-    def create(self):
+    def create(self, model_runner=None):
+        if self.backend == "sglang":
+            if model_runner is None:
+                raise ValueError("Model runner is required for SGLang KV cache")
+            return SglangKVCacheManager(model_runner, self.max_length)
         if self.is_bd_model:
-            return BlockDiffusionPrefixCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type, backend=self.backend, max_length=self.max_length)
-        else:
-            return DiffusionKVCacheManager(cache_update_freq=self.cache_update_freq, cache_type=self.cache_type)
+            return BlockDiffusionPrefixCacheManager(
+                cache_update_freq=self.cache_update_freq,
+                cache_type=self.cache_type,
+                backend=self.backend,
+                max_length=self.max_length,
+            )
+        return DiffusionKVCacheManager(
+            cache_update_freq=self.cache_update_freq, cache_type=self.cache_type
+        )
 
 def gather_sequence_block(partial_data, partial_start, partial_end, block_start, block_end, rank, world_size):
     """ Gather the wanted block data from the partitioned data.

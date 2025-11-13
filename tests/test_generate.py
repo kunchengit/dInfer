@@ -42,7 +42,11 @@ class IterSmoothDiffusionLLM(DiffusionLLM):
         it = self.iterator_factory.create(x, block_length)
         inputs_embeds = self.h2e(x.data)
         iter_no = 0
-        kv_cache = self.cache_factory.create() if self.cache_factory is not None else None
+        kv_cache = (
+            self.cache_factory.create(self.model)
+            if self.cache_factory is not None
+            else None
+        )
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
 
@@ -136,7 +140,7 @@ class IterSmoothWithVicinityCacheDiffusionLLM(DiffusionLLM):
         x = TokenArray(prompt, gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
 
-        kv_cache = self.cache_factory.create()
+        kv_cache = self.cache_factory.create(self.model)
         prompt_len = x.prompt.shape[1]
         total_len = x.total_length
         inputs_embeds = self.h2e(x.data)

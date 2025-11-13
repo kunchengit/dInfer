@@ -1,4 +1,4 @@
-import torch
+﻿import torch
 import gc
 from contextlib import contextmanager
 from typing import Optional, Dict, Any, List, Callable
@@ -9,7 +9,6 @@ from sglang.srt.utils import (
     get_bool_env_var,
     is_hip,
 )
-import bisect
 from sglang.srt.layers.torchao_utils import save_gemlite_cache
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
@@ -23,19 +22,21 @@ import os
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id,
 )
-from sglang.srt.layers.dp_attention import (
-    DpPaddingMode,
-    get_attention_tp_rank,
-    get_attention_tp_size,
-    set_dp_buffer_len,
-)
+from sglang.srt.layers.dp_attention import DpPaddingMode, get_attention_tp_size
 from sglang.srt.custom_op import CustomOp
 from sglang.srt.model_executor.cuda_graph_runner import model_capture_mode
+from sglang.srt.mem_cache.memory_pool import ReqToTokenPool, MHATokenToKVPool
+from sglang.srt.mem_cache.allocator import TokenToKVPoolAllocator
+from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
+from sglang.srt.model_executor.forward_batch_info import (
+    ForwardBatch,
+    ForwardMode,
+    CaptureHiddenMode,
+)
 _is_hip = is_hip()
 
 logger = logging.getLogger(__name__)
-# 假设的上下文管理器，用于在捕获期间冻结垃圾回收
-@contextmanager
+# 鍋囪鐨勪笂涓嬫枃绠＄悊鍣紝鐢ㄤ簬鍦ㄦ崟鑾锋湡闂村喕缁撳瀮鍦惧洖鏀?@contextmanager
 def freeze_gc(enable_cudagraph_gc: bool):
     """
     Optimize garbage collection during CUDA graph capture.
@@ -125,23 +126,117 @@ class ModelRunner:
             self.device = device
             self.gpu_id = torch.cuda.current_device()
         self.enable_compile = enable_compile
-        self.enable_cuda_graph = enable_cuda_graph and (device != "cpu") # CPU 模式下禁用
-        self.supported_batch_sizes = supported_batch_sizes or [1, ] # 默认支持的 batch sizes
+        self.enable_cuda_graph = enable_cuda_graph and (device != "cpu") # CPU 妯″紡涓嬬鐢?        self.supported_batch_sizes = supported_batch_sizes or [1, ] # 榛樿鏀寔鐨?batch sizes
         self.max_length = max_length
         self.block_length = block_length
-        # 设置模型为评估模式
-        x = torch.arange(block_length, dtype=torch.long, device=device).unsqueeze(0)
+        self.max_batch_size = max(self.supported_batch_sizes)
+        self.page_size = 1
+        self.kv_cache_dtype = torch.bfloat16
+        self.req_to_token_pool: Optional[ReqToTokenPool] = None
+        self.token_to_kv_pool: Optional[MHATokenToKVPool] = None
+        self.token_to_kv_pool_allocator: Optional[TokenToKVPoolAllocator] = None
+        self.attn_backend: Optional[FlashAttentionBackend] = None
+        self.graph_runner = None
+        # 璁剧疆妯″瀷涓鸿瘎浼版ā寮?        x = torch.arange(block_length, dtype=torch.long, device=device).unsqueeze(0)
         
         self.model.eval()
         self.tp_group = get_tp_group()
         # self.cuda_graph_runners = {}
         set_custom_all_reduce(True)
 
+        if self.server_args is not None:
+            self._init_sglang_kv_resources()
+
         # _to_torch(self.model, reverse=True, num_tokens=1024)
         self.forward_normal(x, use_cache=True)
         # self.tp_group.ca_comm = backup_ca_comm
-        self.init_device_graphs()
+        if (
+            self.req_to_token_pool is not None
+            and self.token_to_kv_pool_allocator is not None
+            and self.enable_cuda_graph
+        ):
+            self.init_device_graphs()
         
+
+    def _init_sglang_kv_resources(self):
+        kv_dtype_str = getattr(self.server_args, "kv_cache_dtype", "auto")
+        self.kv_cache_dtype = self._parse_kv_dtype(kv_dtype_str)
+        enable_memory_saver = getattr(self.server_args, "enable_memory_saver", False)
+        self.max_total_tokens = self.max_batch_size * self.max_length
+        self.req_to_token_pool = ReqToTokenPool(
+            size=self.max_batch_size,
+            max_context_len=self.max_length,
+            device=self.device,
+            enable_memory_saver=enable_memory_saver,
+        )
+        head_dim = self.model.config.hidden_size // self.model.config.num_attention_heads
+        num_kv_heads = max(1, self.model.config.num_key_value_heads // get_attention_tp_size())
+        self.token_to_kv_pool = MHATokenToKVPool(
+            size=self.max_total_tokens,
+            page_size=self.page_size,
+            dtype=self.kv_cache_dtype,
+            head_num=num_kv_heads,
+            head_dim=head_dim,
+            layer_num=self.model.config.num_hidden_layers,
+            device=self.device,
+            enable_memory_saver=enable_memory_saver,
+        )
+        self.token_to_kv_pool_allocator = TokenToKVPoolAllocator(
+            self.max_total_tokens,
+            dtype=self.kv_cache_dtype,
+            device=self.device,
+            kvcache=self.token_to_kv_pool,
+            need_sort=False,
+        )
+        self.model_config = self.model.config
+        self.sliding_window_size = None
+        self.is_hybrid = False
+        self.attention_chunk_size = None
+        self.attn_backend = FlashAttentionBackend(self)
+
+    def _parse_kv_dtype(self, dtype_str: str):
+        mapping = {
+            "bf16": torch.bfloat16,
+            "bfloat16": torch.bfloat16,
+            "fp16": torch.float16,
+            "float16": torch.float16,
+            "auto": torch.bfloat16,
+        }
+        return mapping.get(dtype_str.lower(), torch.bfloat16)
+
+    def alloc_kv_slots(self, batch_size: int, total_length: int):
+        if self.req_to_token_pool is None or self.token_to_kv_pool_allocator is None:
+            raise RuntimeError("SGLang KV cache is not initialized")
+        req_indices = self.req_to_token_pool.alloc(batch_size)
+        if req_indices is None:
+            raise RuntimeError("No available request slots for KV cache")
+        req_tensor = torch.tensor(req_indices, dtype=torch.int32, device=self.device)
+        slot_rows = []
+        try:
+            for idx in req_indices:
+                slots = self.token_to_kv_pool_allocator.alloc(total_length)
+                if slots is None:
+                    raise RuntimeError("KV cache memory exhausted")
+                slot_rows.append(slots)
+                self.req_to_token_pool.write(idx, slots.to(torch.int32))
+        except Exception:
+            for row in slot_rows:
+                self.token_to_kv_pool_allocator.free(row)
+            self.req_to_token_pool.free(req_indices)
+            raise
+        slot_mapping = torch.stack(slot_rows, dim=0)
+        return req_tensor, slot_mapping
+
+    def free_kv_slots(self, req_pool_indices: torch.Tensor, slot_mapping: torch.Tensor):
+        if (
+            self.req_to_token_pool is None
+            or self.token_to_kv_pool_allocator is None
+            or slot_mapping is None
+        ):
+            return
+        for row in slot_mapping:
+            self.token_to_kv_pool_allocator.free(row)
+        self.req_to_token_pool.free(req_pool_indices.int().tolist())
 
     def init_device_graphs(self):
         """Capture device graphs."""
@@ -172,19 +267,33 @@ class ModelRunner:
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        forward_batch: Optional[ForwardBatch] = None,
     ):
         backup_ca_comm = self.tp_group.ca_comm
         _to_torch(self.model, reverse=False, num_tokens=input_ids.numel())
-        ret = self.model.forward(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
-            pp_proxy_tensors=pp_proxy_tensors,
-            past_key_values=past_key_values,
-            replace_position=replace_position,
-            use_cache=use_cache,
-            attention_mask=attention_mask,
-        )
+        if forward_batch is not None and self.attn_backend is not None:
+            forward_batch.attn_backend = self.attn_backend
+            self.attn_backend.init_forward_metadata(forward_batch)
+            ret = self.model.forward(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                forward_batch=forward_batch,
+                inputs_embeds=inputs_embeds,
+                pp_proxy_tensors=pp_proxy_tensors,
+                use_cache=use_cache,
+                attention_mask=attention_mask,
+            )
+        else:
+            ret = self.model.forward(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                inputs_embeds=inputs_embeds,
+                pp_proxy_tensors=pp_proxy_tensors,
+                past_key_values=past_key_values,
+                replace_position=replace_position,
+                use_cache=use_cache,
+                attention_mask=attention_mask,
+            )
         self.tp_group.ca_comm = backup_ca_comm
         
         return ret
@@ -199,32 +308,59 @@ class ModelRunner:
         replace_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        forward_batch: Optional[ForwardBatch] = None,
     ):
         if isinstance(past_key_values, KVCache):
             past_key_values = past_key_values._data
-        
-        # 简化判断：如果 input_ids 的 seq_len 为 block_length，则认为是 decode 阶段
-        is_decode_phase = input_ids is not None and input_ids.shape[1] == self.block_length and use_cache and past_key_values is not None
-        can_run_graph = bool(
+
+        use_forward_batch = (
+            forward_batch is not None
+            and forward_batch.forward_mode == ForwardMode.DECODE
+        )
+
+        if (
+            use_forward_batch
+            and self.graph_runner
+            and self.enable_cuda_graph
+            and self.graph_runner.can_run(forward_batch)
+        ):
+            return self.graph_runner.replay(forward_batch)
+
+        # 简化判断：如果 input_ids 的长度等于 block_length，则认为是 decode 阶段
+        is_decode_phase = (
+            not use_forward_batch
+            and input_ids is not None
+            and input_ids.shape[1] == self.block_length
+            and use_cache
+            and past_key_values is not None
+        )
+        if (
             is_decode_phase
             and self.graph_runner
-            and self.graph_runner.can_run(input_ids, position_ids, past_key_values)
-        )
-        if can_run_graph and self.enable_cuda_graph:
-            # print('run cuda graph')
-            ret = self.graph_runner.replay(
+            and self.enable_cuda_graph
+            and self.graph_runner.can_run_legacy(input_ids, position_ids, past_key_values)
+        ):
+            return self.graph_runner.replay_legacy(
                 input_ids=input_ids,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
             )
-            return ret
-
         # print('run normal')
-        ret = self.forward_normal(input_ids, position_ids, inputs_embeds, pp_proxy_tensors, past_key_values, replace_position, use_cache, attention_mask)
+        ret = self.forward_normal(
+            input_ids,
+            position_ids,
+            inputs_embeds,
+            pp_proxy_tensors,
+            past_key_values,
+            replace_position,
+            use_cache,
+            attention_mask,
+            forward_batch=forward_batch,
+        )
         # if ret.past_key_values is None:
         # else:
         #     print('run normal', len(ret.past_key_values))
-        # 默认路径：标准 PyTorch 执行
+        # 榛樿璺緞锛氭爣鍑?PyTorch 鎵ц
         return ret
     
     def __call__(self, *args, **kwds):
@@ -233,118 +369,142 @@ class ModelRunner:
         
         
 class CudaGraphRunner:
+    """CUDA graph runner that works with SGLang ForwardBatch decode path."""
+
     def __init__(self, model_runner: ModelRunner):
         self.model_runner = model_runner
-        self.capture_bs, self.compile_bs = model_runner.supported_batch_sizes, model_runner.supported_batch_sizes
+        self.capture_bs = sorted(set(model_runner.supported_batch_sizes))
         self.device = model_runner.device
         self.device_module = torch.get_device_module(self.device)
         self.graphs = {}
         self.output_buffers = {}
-        self.disable_padding = True
-        self.enable_compile = model_runner.enable_compile
-
+        self.forward_mode = ForwardMode.DECODE
+        self.num_tokens_per_bs = model_runner.block_length
         self.max_bs = max(self.capture_bs)
-        self.seq_len_fill_value = 0
-        self.num_tokens_per_bs = self.model_runner.block_length
-        self.max_num_token = self.max_bs * self.num_tokens_per_bs
-        self.tp_size = get_attention_tp_size()
+        self.seq_len_fill_value = self.num_tokens_per_bs
+        self.raw_bs = 0
+        self.raw_num_token = 0
+        self.bs = 0
+
         with torch.device(self.device):
-            self.input_ids = torch.zeros((self.max_num_token,), dtype=torch.int64)
-            self.position_ids = torch.zeros((self.max_num_token,), dtype=torch.int64)
-            num_layers = self.model_runner.model.config.num_hidden_layers
-            num_kv_heads = self.model_runner.model.config.num_key_value_heads
-            num_heads = self.model_runner.model.config.num_attention_heads
-            head_dim = self.model_runner.model.config.hidden_size // num_heads
-            self.past_key_values = torch.zeros((num_layers, 2, self.max_bs, num_kv_heads//self.tp_size, self.model_runner.max_length, head_dim), dtype=torch.bfloat16)
-            
-        # Capture
+            total_tokens = self.max_bs * self.num_tokens_per_bs
+            self.input_ids = torch.zeros(total_tokens, dtype=torch.int64, device=self.device)
+            self.positions = torch.zeros(total_tokens, dtype=torch.int64, device=self.device)
+            self.req_pool_indices = torch.zeros(self.max_bs, dtype=torch.int32, device=self.device)
+            self.seq_lens = torch.zeros(self.max_bs, dtype=torch.int32, device=self.device)
+            self.out_cache_loc = torch.zeros(total_tokens, dtype=torch.int32, device=self.device)
+        self.seq_lens_cpu = torch.zeros(self.max_bs, dtype=torch.int32)
+        self.forward_batches = {}
+
         try:
             with model_capture_mode():
                 self.capture()
-        except RuntimeError as e:
-            raise Exception(
-                f"Capture cuda graph failed: {e}\n"
-            )
-            
+        except RuntimeError as exc:
+            raise Exception(f"Capture cuda graph failed: {exc}") from exc
+
+    def _create_device_graph(self):
+        return torch.cuda.CUDAGraph()
+
     def _capture_graph(self, graph, pool, stream, run_once_fn):
         with self.device_module.graph(graph, pool=pool, stream=stream):
             out = run_once_fn()
         return out
 
-    def _create_device_graph(self):
-        return torch.cuda.CUDAGraph()
-    
+    def _build_forward_batch(self, bs: int) -> ForwardBatch:
+        num_tokens = bs * self.num_tokens_per_bs
+        fb = ForwardBatch(
+            forward_mode=self.forward_mode,
+            batch_size=bs,
+            input_ids=self.input_ids[:num_tokens].view(bs, self.num_tokens_per_bs),
+            req_pool_indices=self.req_pool_indices[:bs],
+            seq_lens=self.seq_lens[:bs],
+            seq_lens_cpu=self.seq_lens_cpu[:bs],
+            out_cache_loc=self.out_cache_loc[:num_tokens],
+            seq_lens_sum=bs * self.num_tokens_per_bs,
+            positions=self.positions[:num_tokens].view(bs, self.num_tokens_per_bs),
+            capture_hidden_mode=CaptureHiddenMode.NULL,
+            dp_padding_mode=DpPaddingMode.get_default_mode_in_cuda_graph(),
+            global_forward_mode=self.forward_mode,
+            global_num_tokens_cpu=[self.num_tokens_per_bs] * bs,
+            global_num_tokens_gpu=self.seq_lens[:bs],
+        )
+        fb.req_to_token_pool = self.model_runner.req_to_token_pool
+        fb.token_to_kv_pool = self.model_runner.token_to_kv_pool
+        fb.attn_backend = self.model_runner.attn_backend
+        return fb
+
+    def _allocate_dummy_slots(self, bs: int):
+        slots = []
+        for req_idx in range(bs):
+            alloc = self.model_runner.token_to_kv_pool_allocator.alloc(self.num_tokens_per_bs)
+            if alloc is None:
+                raise RuntimeError("KV cache memory exhausted during CUDA graph capture")
+            slots.append(alloc)
+            self.model_runner.req_to_token_pool.write(req_idx, alloc.to(torch.int32))
+        if slots:
+            flat = torch.cat(slots)
+            self.out_cache_loc[: bs * self.num_tokens_per_bs].copy_(flat.to(torch.int32))
+        return slots
+
+    def _free_dummy_slots(self, slots):
+        for alloc in slots:
+            self.model_runner.token_to_kv_pool_allocator.free(alloc)
+
     def capture(self) -> None:
-        # Trigger CUDA graph capture for specific shapes.
-        # Capture the large shapes first so that the smaller shapes
-        # can reuse the memory pool allocated for the large shapes.
-        with freeze_gc(
-            self.model_runner.server_args.enable_cudagraph_gc
-        ), graph_capture() as graph_capture_context:
+        with freeze_gc(self.model_runner.server_args.enable_cudagraph_gc), graph_capture() as graph_capture_context:
             self.stream = graph_capture_context.stream
-            avail_mem = get_available_gpu_memory(
-                self.model_runner.device,
-                self.model_runner.gpu_id,
-                empty_cache=False,
-            )
-            # Reverse the order to enable better memory sharing across cuda graphs.
             capture_range = (
                 tqdm.tqdm(list(reversed(self.capture_bs)))
                 if get_tensor_model_parallel_rank() == 0
                 else reversed(self.capture_bs)
             )
-            for i, bs in enumerate(capture_range):
-                if get_tensor_model_parallel_rank() == 0:
-                    avail_mem = get_available_gpu_memory(
-                        self.model_runner.device,
-                        self.model_runner.gpu_id,
-                        empty_cache=False,
-                    )
-                    capture_range.set_description(
-                        f"Capturing batches ({bs=} {avail_mem=:.2f} GB)"
-                    )
-
+            for bs in capture_range:
                 with patch_model(
                     self.model_runner.model,
-                    bs in self.compile_bs and self.enable_compile,
+                    False,
                     num_tokens=bs * self.num_tokens_per_bs,
                     tp_group=self.model_runner.tp_group,
                 ) as forward:
-                    (
-                        graph,
-                        output_buffers,
-                    ) = self.capture_one_batch_size(bs, forward)
+                    graph, output = self.capture_one_batch_size(bs, forward)
                     self.graphs[bs] = graph
-                    self.output_buffers[bs] = output_buffers
-
-                # Save gemlite cache after each capture
+                    self.output_buffers[bs] = output
                 save_gemlite_cache()
-
 
     def capture_one_batch_size(self, bs: int, forward: Callable):
         graph = self._create_device_graph()
         stream = self.stream
         num_tokens = bs * self.num_tokens_per_bs
 
-        # Graph inputs
-        input_ids = self.input_ids[:num_tokens].view(bs, self.num_tokens_per_bs)
-        position_ids = self.position_ids[:num_tokens].view(bs, self.num_tokens_per_bs)
-        past_key_values = self.past_key_values[:, :, :bs]
+        forward_batch = self._build_forward_batch(bs)
+        slots = self._allocate_dummy_slots(bs)
+        self.seq_lens[:bs].fill_(self.num_tokens_per_bs)
+        self.seq_lens_cpu[:bs].fill_(self.num_tokens_per_bs)
+        self.req_pool_indices[:bs].copy_(torch.arange(bs, dtype=torch.int32, device=self.device))
+        self.positions[:num_tokens] = torch.arange(self.num_tokens_per_bs, device=self.device).repeat(bs)
+        self.input_ids[:num_tokens].zero_()
 
-        # Run and capture
+        self.model_runner.attn_backend.init_forward_metadata_capture_cuda_graph(
+            bs,
+            num_tokens,
+            self.req_pool_indices[:bs],
+            self.seq_lens[:bs],
+            None,
+            self.forward_mode,
+            None,
+        )
+
         def run_once():
-            # print('run once', input_ids.shape, position_ids.shape, past_key_values.shape)
-            logits_output = forward(
-                input_ids=input_ids,
-                position_ids=position_ids,
+            return forward(
+                input_ids=forward_batch.input_ids,
+                position_ids=forward_batch.positions,
                 inputs_embeds=None,
                 pp_proxy_tensors=None,
-                past_key_values=past_key_values,
+                past_key_values=None,
                 replace_position=(0, 0),
                 use_cache=True,
                 attention_mask=None,
+                forward_batch=forward_batch,
             )
-            return logits_output
 
         for _ in range(2):
             self.device_module.synchronize()
@@ -353,50 +513,56 @@ class CudaGraphRunner:
 
         if get_global_graph_memory_pool() is None:
             set_global_graph_memory_pool(self.device_module.graph_pool_handle())
-        # Set graph pool id globally to be able to use symmetric memory
         set_graph_pool_id(get_global_graph_memory_pool())
-        out = self._capture_graph(
-            graph, get_global_graph_memory_pool(), stream, run_once
-        )
+        out = self._capture_graph(graph, get_global_graph_memory_pool(), stream, run_once)
 
+        self._free_dummy_slots(slots)
+        self.forward_batches[bs] = forward_batch
         return graph, out
 
-    def can_run(self, input_ids, position_ids, past_key_values):
-        cuda_graph_bs = input_ids.shape[0]
-        # print('can run?', cuda_graph_bs, self.graphs.keys(), self.max_bs)
-        is_bs_supported = (
-            cuda_graph_bs in self.graphs  # 不 padding 模式 → 必须 exact match
-            if self.disable_padding
-            else cuda_graph_bs <= self.max_bs  # padding 模式 → 可填充至最近更大的 graph
+    def can_run(self, forward_batch: ForwardBatch) -> bool:
+        return (
+            forward_batch.forward_mode == self.forward_mode
+            and forward_batch.batch_size in self.graphs
         )
-        return is_bs_supported
 
+    def replay_prepare(self, forward_batch: ForwardBatch):
+        bs = forward_batch.batch_size
+        if bs not in self.graphs:
+            raise ValueError(f"Unsupported CUDA graph batch size {bs}")
 
-    def replay_prepare(self, input_ids, position_ids, past_key_values):
-        raw_bs = input_ids.shape[0]
-        raw_num_token = raw_bs * self.num_tokens_per_bs
+        num_tokens = bs * self.num_tokens_per_bs
+        self.input_ids[:num_tokens].copy_(forward_batch.input_ids.reshape(-1))
+        self.positions[:num_tokens].copy_(forward_batch.positions.reshape(-1))
+        self.req_pool_indices[:bs].copy_(forward_batch.req_pool_indices)
+        self.seq_lens[:bs].copy_(forward_batch.seq_lens)
+        self.seq_lens_cpu[:bs].copy_(forward_batch.seq_lens_cpu)
+        self.out_cache_loc[:num_tokens].copy_(forward_batch.out_cache_loc.reshape(-1))
 
-        # 查找最接近的支持的 bs
-        index = bisect.bisect_left(self.capture_bs, raw_bs)
-        bs = self.capture_bs[index]
+        seq_lens_sum = int(forward_batch.seq_lens_sum)
+        self.model_runner.attn_backend.init_forward_metadata_replay_cuda_graph(
+            bs,
+            self.req_pool_indices[:bs],
+            self.seq_lens[:bs],
+            seq_lens_sum,
+            None,
+            self.forward_mode,
+            None,
+            seq_lens_cpu=self.seq_lens_cpu[:bs],
+            out_cache_loc=self.out_cache_loc[:num_tokens],
+        )
 
-        # 拷贝真实数据到静态 buffer
-        self.input_ids[:raw_num_token].copy_(input_ids.flatten())
-        self.position_ids[:raw_num_token].copy_(position_ids.flatten())
-        minimal_length = min(self.past_key_values.shape[4], past_key_values.shape[4])
-        self.past_key_values[:, :, :bs, :, :minimal_length].copy_(past_key_values[:, :, :, :, :minimal_length])
-        self.raw_bs = raw_bs
-        self.raw_num_token = raw_num_token
+        self.raw_bs = bs
+        self.raw_num_token = num_tokens
         self.bs = bs
 
-
-    def replay(
-        self, input_ids, position_ids, past_key_values,
-    ):
-        self.replay_prepare(input_ids, position_ids, past_key_values)
-
-        # Replay
+    def replay(self, forward_batch: ForwardBatch):
+        self.replay_prepare(forward_batch)
         self.graphs[self.bs].replay()
+        return self.output_buffers[self.bs]
 
-        output = self.output_buffers[self.bs]
-        return output
+    def can_run_legacy(self, *args, **kwargs) -> bool:
+        return False
+
+    def replay_legacy(self, *args, **kwargs):
+        raise RuntimeError("Legacy CUDA graph path is not available with the SGLang backend.")

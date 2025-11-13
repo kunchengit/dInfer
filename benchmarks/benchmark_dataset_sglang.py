@@ -125,7 +125,14 @@ def main(world_size, rank, gpu_id, args):
     model = model.to(device)
     input_lengths = [inp.size(-1) for inp in all_input_ids]
     max_length = max(input_lengths)+args.gen_len
-    model = ModelRunner(model, device, server_args=server_args, max_length=max_length)
+    model = ModelRunner(
+        model,
+        device,
+        server_args=server_args,
+        max_length=max_length,
+        block_length=args.block_length,
+        supported_batch_sizes=[args.batch_size],
+    )
 
 
     if args.parallel_decoding == 'threshold':

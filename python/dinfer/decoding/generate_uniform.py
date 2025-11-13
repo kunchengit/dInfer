@@ -151,14 +151,36 @@ class BlockDiffusionRunner(BlockRunner):
         """
         if kv_cache is None:
             return
+        if hasattr(kv_cache, "build_prefill_batch"):
+            forward_batch = kv_cache.build_prefill_batch(
+                block.clone(memory_format=torch.contiguous_format),
+                pos_ids[:, : block.shape[1]].clone(memory_format=torch.contiguous_format),
+            )
+            model(
+                block.clone(memory_format=torch.contiguous_format),
+                position_ids=pos_ids[:, : block.shape[1]].clone(
+                    memory_format=torch.contiguous_format
+                ),
+                use_cache=True,
+                attention_mask=attn_mask,
+                forward_batch=forward_batch,
+            )
+            self.diff_iteration.num_forwards += 1
+            self.diff_iteration.iter_no += 1
+            return
+
+        output = model(
+            block.clone(memory_format=torch.contiguous_format),
+            use_cache=True,
+            attention_mask=attn_mask,
+            position_ids=pos_ids.clone(memory_format=torch.contiguous_format),
+        )
+        if self.backend == "vllm":
+            kv_cache.update(output.past_key_values)
         else:
-            output = model(block.clone(memory_format=torch.contiguous_format), use_cache=True, attention_mask=attn_mask, position_ids=pos_ids.clone(memory_format=torch.contiguous_format))
-            if self.backend == 'vllm':
-                kv_cache.update(output.past_key_values)
-            else:
-                kv_cache.range_update(output.past_key_values, 0, block.size(1), 0)
-            self.diff_iteration.num_forwards +=1
-            self.diff_iteration.iter_no +=1
+            kv_cache.range_update(output.past_key_values, 0, block.size(1), 0)
+        self.diff_iteration.num_forwards += 1
+        self.diff_iteration.iter_no += 1
 
     def decode(self, model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask):
         """ Decode all tokens in a block.
@@ -193,9 +215,28 @@ class BlockDiffusionRunner(BlockRunner):
         block = x[:, block_loc.start:block_loc.end]
         batch_size = x.batch_size
 
-        if kv_cache is not None:
+        forward_batch = None
+        forward_batch_builder = None
+        if kv_cache is not None and hasattr(kv_cache, "build_decode_batch"):
+
+            def _build_forward_batch():
+                return kv_cache.build_decode_batch(
+                    block.clone(memory_format=torch.contiguous_format),
+                    pos_ids[:, block_loc.start : block_loc.end].clone(
+                        memory_format=torch.contiguous_format
+                    ),
+                    block_loc.start,
+                    block_loc.end,
+                )
+
+            forward_batch_builder = _build_forward_batch
+            forward_batch = forward_batch_builder()
+            past_key_values, replace_position = None, None
+        elif kv_cache is not None:
             kv_cache.extend_cache(block_loc.end)
-            past_key_values, replace_position = kv_cache.get_key_values(block_loc.start, block_loc.end)
+            past_key_values, replace_position = kv_cache.get_key_values(
+                block_loc.start, block_loc.end
+            )
         else:
             past_key_values, replace_position = None, None
 
@@ -204,7 +245,23 @@ class BlockDiffusionRunner(BlockRunner):
             unroll_k = int(max(min((block == decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 2))
             for unroll_i in range(unroll_k):
                 input_block_mask_number = (block == decoder.mask_id).sum()
-                output = self.diff_iteration.forward(model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position, self.backend)
+                if forward_batch_builder is not None:
+                    forward_batch = forward_batch_builder()
+                output = self.diff_iteration.forward(
+                    model,
+                    decoder,
+                    x,
+                    kv_cache,
+                    block,
+                    block_loc,
+                    block_id,
+                    pos_ids,
+                    attn_mask,
+                    past_key_values,
+                    replace_position,
+                    self.backend,
+                    forward_batch,
+                )
             if batch_size > 1:
                 seq_idx, x = select_undecoded(seq_idx, orig_x, x, block, block_loc, decoder.mask_id, writeback=True)
                 block = x[:, block_loc.start:block_loc.end]
@@ -212,7 +269,7 @@ class BlockDiffusionRunner(BlockRunner):
                 if len(seq_idx) == 0:
                     break
         # additional forward to update kvcache for the last decoding step in the current block
-        if kv_cache is not None:
+        if kv_cache is not None and not hasattr(kv_cache, "build_decode_batch"):
             if input_block_mask_number > 0:
                 output = model(block.clone(memory_format=torch.contiguous_format), 
                     past_key_values=past_key_values,
@@ -313,7 +370,7 @@ class BlockDiffusionIteration:
         self.cache_updates = 0
         self.iter_no = 0
 
-    def forward(self, model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position, backend):
+    def forward(self, model, decoder, x, kv_cache, block, block_loc, block_id, pos_ids, attn_mask, past_key_values, replace_position, backend, forward_batch=None):
         """ Decode tokens in a forward run on a block.
 
         The forward run decodes tokens in the input array.
@@ -344,20 +401,42 @@ class BlockDiffusionIteration:
             The tensor indicates the valid locations in the returned key-values.
         """
         if kv_cache is None:
-            output = model(x.data[:, :block_loc.end], 
-                attention_mask=attn_mask[:,:block_loc.end,:block_loc.end],
-                position_ids=pos_ids[:, :block_loc.end])
+            output = model(
+                x.data[:, :block_loc.end],
+                attention_mask=attn_mask[:, : block_loc.end, : block_loc.end],
+                position_ids=pos_ids[:, :block_loc.end],
+            )
             logits = output.logits[:, block_loc.start:block_loc.end]
         else:
-            output = model(block.clone(memory_format=torch.contiguous_format),
-                position_ids=pos_ids[:,block_loc.start:block_loc.end].clone(memory_format=torch.contiguous_format),
-                use_cache=True,
-                past_key_values=past_key_values,
-                replace_position=(0,0) if backend=='sglang' else replace_position)
+            if forward_batch is not None:
+                forward_batch.input_ids = block.clone(
+                    memory_format=torch.contiguous_format
+                )
+                forward_batch.positions = pos_ids[:, block_loc.start:block_loc.end].clone(
+                    memory_format=torch.contiguous_format
+                )
+                output = model(
+                    forward_batch.input_ids,
+                    position_ids=forward_batch.positions,
+                    use_cache=True,
+                    forward_batch=forward_batch,
+                    attention_mask=attn_mask,
+                )
+            else:
+                output = model(
+                    block.clone(memory_format=torch.contiguous_format),
+                    position_ids=pos_ids[:, block_loc.start:block_loc.end].clone(
+                        memory_format=torch.contiguous_format
+                    ),
+                    use_cache=True,
+                    past_key_values=past_key_values,
+                    replace_position=(0, 0)
+                    if backend == "sglang"
+                    else replace_position,
+                )
+                if backend == "vllm":
+                    kv_cache.update(output.past_key_values)
             logits = output.logits
-            # TODO(dulun): we don't need update kv cache for every step.
-            if backend == 'vllm':
-                kv_cache.update(output.past_key_values)
             
         decoder.decode(logits, block_loc.start, block_loc.end, x)
         self.num_forwards += 1
@@ -478,7 +557,15 @@ class BlockWiseDiffusionLLM(DiffusionLLM):
 
         # We need to reset iter_no at the beginning of generating a sequence.
         self.diff_iteration.iter_no = 0
-        kv_cache = self.cache_factory.create() if self.cache_factory is not None else None
+        kv_cache = (
+            self.cache_factory.create(self.model)
+            if self.cache_factory is not None
+            else None
+        )
+        if kv_cache is not None and hasattr(kv_cache, "initialize"):
+            kv_cache.initialize(prompt.shape[0], total_length)
+        if kv_cache is not None and hasattr(kv_cache, "initialize"):
+            kv_cache.initialize(prompt.shape[0], x.total_length)
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
             decode_compl = self.block_decoder.decode(self.model, self.decoder, x, kv_cache, block, block_loc, block_id)
@@ -486,6 +573,8 @@ class BlockWiseDiffusionLLM(DiffusionLLM):
             if torch.all(decode_compl):
                 break
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
+        if kv_cache is not None and hasattr(kv_cache, "release"):
+            kv_cache.release()
         return x.get_generated_tokens()
 
 class IterationSmooth(DiffusionIteration):
@@ -591,7 +680,11 @@ class IterSmoothDiffusionLLM(BlockWiseDiffusionLLM):
         # We need to reset iter_no at the beginning of generating a sequence.
         self.diff_iteration.iter_no = 0
         self.diff_iteration.reset_input_embeds(x)
-        kv_cache = self.cache_factory.create() if self.cache_factory is not None else None
+        kv_cache = (
+            self.cache_factory.create(self.model)
+            if self.cache_factory is not None
+            else None
+        )
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
             decode_compl = self.block_decoder.decode(self.model, self.decoder, x, kv_cache, block, block_loc, block_id)
@@ -947,7 +1040,7 @@ class BlockDiffusionLLM(DiffusionLLM):
         x = TokenArray(prompt, new_gen_length, self.decoder.mask_id, self.decoder.eos_id, self.model.device)
         it = self.iterator_factory.create(x, block_length)
         prompt_length = it._get_first_block_start()
-        kv_cache = self.cache_factory.create()
+        kv_cache = self.cache_factory.create(self.model)
 
         # prefill for kv_cache
         prefill_blocks = prompt_length // block_length
@@ -964,4 +1057,3 @@ class BlockDiffusionLLM(DiffusionLLM):
                 break
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
         return x.get_generated_tokens()
-
