@@ -28,6 +28,7 @@ from sglang.srt.model_executor.cuda_graph_runner import model_capture_mode
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool, MHATokenToKVPool
 from sglang.srt.mem_cache.allocator import TokenToKVPoolAllocator
 from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
+from sglang.srt.configs.model_config import AttentionArch
 from sglang.srt.model_executor.forward_batch_info import (
     ForwardBatch,
     ForwardMode,
@@ -139,6 +140,9 @@ class ModelRunner:
         self.token_to_kv_pool_allocator: Optional[TokenToKVPoolAllocator] = None
         self.attn_backend: Optional[FlashAttentionBackend] = None
         self.graph_runner = None
+        self.sliding_window_size = None
+        self.is_hybrid = False
+        self.attention_chunk_size = None
         # 设置模型为评估模式
         x = torch.arange(block_length, dtype=torch.long, device=device).unsqueeze(0)
         
@@ -148,9 +152,12 @@ class ModelRunner:
         set_custom_all_reduce(True)
 
         if self.server_args is not None:
-            self._init_sglang_kv_resources()
+            self.init_memory_pool()
+            self.init_attention_backend()
 
         # _to_torch(self.model, reverse=True, num_tokens=1024)
+        self.model_config = self.model.config
+
         self.forward_normal(x, use_cache=True)
         # self.tp_group.ca_comm = backup_ca_comm
         if (
@@ -161,7 +168,7 @@ class ModelRunner:
             self.init_device_graphs()
         
 
-    def _init_sglang_kv_resources(self):
+    def init_memory_pool(self):
         kv_dtype_str = getattr(self.server_args, "kv_cache_dtype", "auto")
         self.kv_cache_dtype = self._parse_kv_dtype(kv_dtype_str)
         enable_memory_saver = getattr(self.server_args, "enable_memory_saver", False)
@@ -191,10 +198,29 @@ class ModelRunner:
             kvcache=self.token_to_kv_pool,
             need_sort=False,
         )
-        self.model_config = self.model.config
-        self.sliding_window_size = None
-        self.is_hybrid = False
-        self.attention_chunk_size = None
+
+    def init_attention_backend(self):
+        if self.server_args is None:
+            return
+
+        if not hasattr(self.model_config, "context_len") or self.model_config.context_len is None:
+            self.model_config.context_len = getattr(
+                self.server_args, "max_model_len", self.max_length
+            )
+
+        if not hasattr(self.model_config, "attention_arch"):
+            self.model_config.attention_arch = AttentionArch.MHA
+
+        if not hasattr(self.model_config, "is_encoder_decoder"):
+            self.model_config.is_encoder_decoder = False
+
+        self.sliding_window_size = getattr(
+            self.model_config, "sliding_window_size", None
+        )
+        self.is_hybrid = getattr(self.model_config, "is_hybrid", False)
+        self.attention_chunk_size = getattr(
+            self.model_config, "attention_chunk_size", None
+        )
         self.attn_backend = FlashAttentionBackend(self)
 
     def _parse_kv_dtype(self, dtype_str: str):
