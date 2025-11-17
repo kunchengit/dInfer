@@ -151,6 +151,7 @@ class BlockDiffusionRunner(BlockRunner):
         """
         if kv_cache is None:
             return
+        # TODO (chenkun): cant't handle attention mask for now
         if hasattr(kv_cache, "build_prefill_batch"):
             forward_batch = kv_cache.build_prefill_batch(
                 block.clone(memory_format=torch.contiguous_format),
@@ -216,10 +217,10 @@ class BlockDiffusionRunner(BlockRunner):
         batch_size = x.batch_size
 
         forward_batch = None
-        forward_batch_builder = None
+        build_forward_batch = None
         if kv_cache is not None and hasattr(kv_cache, "build_decode_batch"):
 
-            def _build_forward_batch():
+            def build_forward_batch():
                 return kv_cache.build_decode_batch(
                     block.clone(memory_format=torch.contiguous_format),
                     pos_ids[:, block_loc.start : block_loc.end].clone(
@@ -229,8 +230,7 @@ class BlockDiffusionRunner(BlockRunner):
                     block_loc.end,
                 )
 
-            forward_batch_builder = _build_forward_batch
-            forward_batch = forward_batch_builder()
+            forward_batch = build_forward_batch()
             past_key_values, replace_position = None, None
         elif kv_cache is not None:
             kv_cache.extend_cache(block_loc.end)
@@ -245,8 +245,8 @@ class BlockDiffusionRunner(BlockRunner):
             unroll_k = int(max(min((block == decoder.mask_id).sum()//self.expected_tpf, self.maximum_unroll), 2))
             for unroll_i in range(unroll_k):
                 input_block_mask_number = (block == decoder.mask_id).sum()
-                if forward_batch_builder is not None:
-                    forward_batch = forward_batch_builder()
+                if build_forward_batch is not None:
+                    forward_batch = build_forward_batch()
                 output = self.diff_iteration.forward(
                     model,
                     decoder,
@@ -269,7 +269,18 @@ class BlockDiffusionRunner(BlockRunner):
                 if len(seq_idx) == 0:
                     break
         # additional forward to update kvcache for the last decoding step in the current block
-        if kv_cache is not None and not hasattr(kv_cache, "build_decode_batch"):
+        if build_forward_batch is not None:
+            forward_batch = build_forward_batch()
+            model(
+                forward_batch.input_ids,
+                position_ids=forward_batch.positions,
+                use_cache=True,
+                forward_batch=forward_batch,
+                attention_mask=attn_mask,
+            )
+            self.diff_iteration.num_forwards += 1
+            self.diff_iteration.iter_no += 1
+        elif kv_cache is not None and not hasattr(kv_cache, "build_decode_batch"):
             if input_block_mask_number > 0:
                 output = model(block.clone(memory_format=torch.contiguous_format), 
                     past_key_values=past_key_values,
@@ -562,8 +573,6 @@ class BlockWiseDiffusionLLM(DiffusionLLM):
             if self.cache_factory is not None
             else None
         )
-        if kv_cache is not None and hasattr(kv_cache, "initialize"):
-            kv_cache.initialize(prompt.shape[0], total_length)
         if kv_cache is not None and hasattr(kv_cache, "initialize"):
             kv_cache.initialize(prompt.shape[0], x.total_length)
         for block_id, (block_loc, block) in enumerate(it):
@@ -1042,6 +1051,10 @@ class BlockDiffusionLLM(DiffusionLLM):
         prompt_length = it._get_first_block_start()
         kv_cache = self.cache_factory.create(self.model)
 
+        # Initialize KV cache with the total sequence length
+        if kv_cache is not None and hasattr(kv_cache, "initialize"):
+            kv_cache.initialize(batch_size, total_length)
+
         # prefill for kv_cache
         prefill_blocks = prompt_length // block_length
         prefill_length = prefill_blocks * block_length
@@ -1056,4 +1069,6 @@ class BlockDiffusionLLM(DiffusionLLM):
             if torch.all(decode_compl) and self.early_stop:
                 break
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
+        if kv_cache is not None and hasattr(kv_cache, "release"):
+            kv_cache.release()
         return x.get_generated_tokens()

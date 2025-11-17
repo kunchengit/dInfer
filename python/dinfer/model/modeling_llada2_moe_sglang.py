@@ -1140,7 +1140,7 @@ class LLaDA2Model(nn.Module):
                 attention_mask=attention_mask,
                 forward_batch=forward_batch,
             )
-            if use_cache:
+            if use_cache and present_key_values is not None:
                 all_present_key_values.extend(present_key_values)
         if not self.pp_group.is_last_rank:
             return PPProxyTensors(

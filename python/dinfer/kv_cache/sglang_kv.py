@@ -115,15 +115,20 @@ class SglangKVCacheManager:
     def _global_tokens_list(self, seq_lens_cpu: torch.Tensor) -> Sequence[int]:
         return [int(val) for val in seq_lens_cpu.tolist()]
 
-    def _base_forward_batch(
+    def _prepare_extend_batch(
         self,
         mode: ForwardMode,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        seq_lens: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
-        out_cache_loc: torch.Tensor,
+        prefix_lens: torch.Tensor,
+        extend_lens: torch.Tensor,
+        target_lens: torch.Tensor,
     ) -> ForwardBatch:
+        self._ensure_length(target_lens)
+        out_cache_loc = self._slice_slots(prefix_lens, extend_lens)
+
+        seq_lens = self.seq_lens.clone()
+        seq_lens_cpu = self.seq_lens_cpu.clone()
         forward_batch = ForwardBatch(
             forward_mode=mode,
             batch_size=self.batch_size,
@@ -140,10 +145,13 @@ class SglangKVCacheManager:
             global_num_tokens_cpu=self._global_tokens_list(seq_lens_cpu),
             global_num_tokens_gpu=seq_lens.clone(),
         )
-
         forward_batch.req_to_token_pool = self.model_runner.req_to_token_pool
         forward_batch.token_to_kv_pool = self.model_runner.token_to_kv_pool
         forward_batch.attn_backend = self.model_runner.attn_backend
+        forward_batch.extend_prefix_lens = prefix_lens
+        forward_batch.extend_prefix_lens_cpu = prefix_lens.detach().to("cpu")
+        forward_batch.extend_seq_lens = extend_lens
+        forward_batch.extend_seq_lens_cpu = extend_lens.detach().to("cpu")
         return forward_batch
 
     def build_prefill_batch(
@@ -153,29 +161,24 @@ class SglangKVCacheManager:
     ) -> ForwardBatch:
         if not self.initialized:
             raise RuntimeError("KV cache has not been initialized")
-        block_len = input_ids.size(1)
-        extend = torch.full(
-            (self.batch_size,), block_len, dtype=torch.int32, device=self.device
+        prompt_block_len = input_ids.size(1)
+        prefill_len = torch.full(
+            (self.batch_size,), prompt_block_len, dtype=torch.int32, device=self.device
         )
-        target = self.seq_lens + extend
+        prefix = self.seq_lens.clone()
+        target = prefix + prefill_len
         if torch.any(target > self.target_length):
             raise ValueError("Prefill exceeds reserved length")
-        prev = self.seq_lens.clone()
-        self._ensure_length(target)
-        out_cache_loc = self._slice_slots(prev, extend)
 
-        forward_batch = self._base_forward_batch(
+        forward_batch = self._prepare_extend_batch(
             ForwardMode.EXTEND,
             input_ids,
             positions,
-            self.seq_lens.clone(),
-            self.seq_lens_cpu.clone(),
-            out_cache_loc,
+            prefix,
+            prefill_len,
+            target
         )
-        forward_batch.extend_prefix_lens = prev
-        forward_batch.extend_prefix_lens_cpu = prev.detach().to("cpu")
-        forward_batch.extend_seq_lens = extend
-        forward_batch.extend_seq_lens_cpu = extend.detach().to("cpu")
+        forward_batch.is_diffusion = True
         return forward_batch
 
     def build_decode_batch(
@@ -193,24 +196,24 @@ class SglangKVCacheManager:
         target = torch.full(
             (self.batch_size,), block_end, dtype=torch.int32, device=self.device
         )
-        self._ensure_length(target)
 
         starts = torch.full(
             (self.batch_size,), block_start, dtype=torch.int32, device=self.device
         )
-        lengths = torch.full(
+        extend_len = torch.full(
             (self.batch_size,), block_end - block_start, dtype=torch.int32, device=self.device
         )
-        out_cache_loc = self._slice_slots(starts, lengths)
 
-        return self._base_forward_batch(
-            ForwardMode.DECODE,
+        forward_batch = self._prepare_extend_batch(
+            ForwardMode.EXTEND,
             input_ids,
             positions,
-            self.seq_lens.clone(),
-            self.seq_lens_cpu.clone(),
-            out_cache_loc,
+            starts,
+            extend_len,
+            target,
         )
+        forward_batch.is_diffusion = True
+        return forward_batch
 
     def extend_cache(self, *_args, **_kwargs):
         """Compatibility shim for legacy callers."""

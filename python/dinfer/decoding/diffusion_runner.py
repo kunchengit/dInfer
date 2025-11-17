@@ -151,13 +151,13 @@ class ModelRunner:
         # self.cuda_graph_runners = {}
         set_custom_all_reduce(True)
 
+        self.model_config = getattr(self.model, "config", None)
+        
         if self.server_args is not None:
             self.init_memory_pool()
             self.init_attention_backend()
 
         # _to_torch(self.model, reverse=True, num_tokens=1024)
-        self.model_config = self.model.config
-
         self.forward_normal(x, use_cache=True)
         # self.tp_group.ca_comm = backup_ca_comm
         if (
@@ -403,17 +403,27 @@ class CudaGraphRunner:
     def __init__(self, model_runner: ModelRunner):
         self.model_runner = model_runner
         self.capture_bs = sorted(set(model_runner.supported_batch_sizes))
+        self.compile_bs = sorted(set(model_runner.supported_batch_sizes))
         self.device = model_runner.device
         self.device_module = torch.get_device_module(self.device)
         self.graphs = {}
         self.output_buffers = {}
+        self.enable_compile = model_runner.enable_compile
+
         self.forward_mode = ForwardMode.DECODE
-        self.num_tokens_per_bs = model_runner.block_length
+
         self.max_bs = max(self.capture_bs)
-        self.seq_len_fill_value = self.num_tokens_per_bs
-        self.raw_bs = 0
-        self.raw_num_token = 0
-        self.bs = 0
+        self.seq_len_fill_value = 0
+        self.num_tokens_per_bs = self.model_runner.block_length
+
+        if self.model_runner.attn_backend is not None:
+            max_num_tokens = self.max_bs * self.num_tokens_per_bs
+            self.model_runner.attn_backend.init_cuda_graph_state(
+                self.max_bs, max_num_tokens
+            )
+        # self.raw_bs = 0
+        # self.raw_num_token = 0
+        # self.bs = 0
 
         with torch.device(self.device):
             total_tokens = self.max_bs * self.num_tokens_per_bs
@@ -462,23 +472,6 @@ class CudaGraphRunner:
         fb.attn_backend = self.model_runner.attn_backend
         return fb
 
-    def _allocate_dummy_slots(self, bs: int):
-        slots = []
-        for req_idx in range(bs):
-            alloc = self.model_runner.token_to_kv_pool_allocator.alloc(self.num_tokens_per_bs)
-            if alloc is None:
-                raise RuntimeError("KV cache memory exhausted during CUDA graph capture")
-            slots.append(alloc)
-            self.model_runner.req_to_token_pool.write(req_idx, alloc.to(torch.int32))
-        if slots:
-            flat = torch.cat(slots)
-            self.out_cache_loc[: bs * self.num_tokens_per_bs].copy_(flat.to(torch.int32))
-        return slots
-
-    def _free_dummy_slots(self, slots):
-        for alloc in slots:
-            self.model_runner.token_to_kv_pool_allocator.free(alloc)
-
     def capture(self) -> None:
         with freeze_gc(self.model_runner.server_args.enable_cudagraph_gc), graph_capture() as graph_capture_context:
             self.stream = graph_capture_context.stream
@@ -490,13 +483,15 @@ class CudaGraphRunner:
             for bs in capture_range:
                 with patch_model(
                     self.model_runner.model,
-                    False,
+                    bs in self.compile_bs and self.enable_compile,
                     num_tokens=bs * self.num_tokens_per_bs,
                     tp_group=self.model_runner.tp_group,
                 ) as forward:
                     graph, output = self.capture_one_batch_size(bs, forward)
                     self.graphs[bs] = graph
                     self.output_buffers[bs] = output
+
+                # Save gemlite cache after each capture
                 save_gemlite_cache()
 
     def capture_one_batch_size(self, bs: int, forward: Callable):
@@ -505,12 +500,22 @@ class CudaGraphRunner:
         num_tokens = bs * self.num_tokens_per_bs
 
         forward_batch = self._build_forward_batch(bs)
-        slots = self._allocate_dummy_slots(bs)
         self.seq_lens[:bs].fill_(self.num_tokens_per_bs)
         self.seq_lens_cpu[:bs].fill_(self.num_tokens_per_bs)
         self.req_pool_indices[:bs].copy_(torch.arange(bs, dtype=torch.int32, device=self.device))
         self.positions[:num_tokens] = torch.arange(self.num_tokens_per_bs, device=self.device).repeat(bs)
         self.input_ids[:num_tokens].zero_()
+        self.out_cache_loc[:num_tokens].zero_()
+        forward_batch.seq_lens_sum = int(self.seq_lens[:bs].sum().item())
+        prefix = torch.zeros(bs, dtype=torch.int32, device=self.device)
+        extend = torch.full(
+            (bs,), self.num_tokens_per_bs, dtype=torch.int32, device=self.device
+        )
+        forward_batch.extend_prefix_lens = prefix
+        forward_batch.extend_prefix_lens_cpu = prefix.detach().to("cpu")
+        forward_batch.extend_seq_lens = extend
+        forward_batch.extend_seq_lens_cpu = extend.detach().to("cpu")
+        forward_batch.is_diffusion = True
 
         self.model_runner.attn_backend.init_forward_metadata_capture_cuda_graph(
             bs,
@@ -545,7 +550,6 @@ class CudaGraphRunner:
         set_graph_pool_id(get_global_graph_memory_pool())
         out = self._capture_graph(graph, get_global_graph_memory_pool(), stream, run_once)
 
-        self._free_dummy_slots(slots)
         self.forward_batches[bs] = forward_batch
         return graph, out
 
