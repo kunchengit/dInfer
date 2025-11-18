@@ -568,13 +568,7 @@ class BlockWiseDiffusionLLM(DiffusionLLM):
 
         # We need to reset iter_no at the beginning of generating a sequence.
         self.diff_iteration.iter_no = 0
-        kv_cache = (
-            self.cache_factory.create(self.model)
-            if self.cache_factory is not None
-            else None
-        )
-        if kv_cache is not None and hasattr(kv_cache, "initialize"):
-            kv_cache.initialize(prompt.shape[0], x.total_length)
+        kv_cache = self.cache_factory.create() if self.cache_factory is not None else None
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
             decode_compl = self.block_decoder.decode(self.model, self.decoder, x, kv_cache, block, block_loc, block_id)
@@ -582,8 +576,6 @@ class BlockWiseDiffusionLLM(DiffusionLLM):
             if torch.all(decode_compl):
                 break
         logger.info(f'The number of diffusion iterations: {self.num_forwards}')
-        if kv_cache is not None and hasattr(kv_cache, "release"):
-            kv_cache.release()
         return x.get_generated_tokens()
 
 class IterationSmooth(DiffusionIteration):
@@ -689,11 +681,7 @@ class IterSmoothDiffusionLLM(BlockWiseDiffusionLLM):
         # We need to reset iter_no at the beginning of generating a sequence.
         self.diff_iteration.iter_no = 0
         self.diff_iteration.reset_input_embeds(x)
-        kv_cache = (
-            self.cache_factory.create(self.model)
-            if self.cache_factory is not None
-            else None
-        )
+        kv_cache = self.cache_factory.create() if self.cache_factory is not None else None
         for block_id, (block_loc, block) in enumerate(it):
             self.decoder.block_init(block, block_id)
             decode_compl = self.block_decoder.decode(self.model, self.decoder, x, kv_cache, block, block_loc, block_id)
